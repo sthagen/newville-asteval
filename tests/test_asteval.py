@@ -8,28 +8,22 @@ import textwrap
 import time
 import unittest
 import pytest
-
+from io import StringIO
 
 from sys import version_info
 from tempfile import NamedTemporaryFile
 
-PY3 = version_info[0] == 3
-PY33Plus = PY3 and version_info[1] >= 3
-PY35Plus = PY3 and version_info[1] >= 5
-PY35     = PY3 and version_info[1] == 5
-PY36Plus = PY3 and version_info[1] >= 6
-
-if PY3:
-    # noinspection PyUnresolvedReferences
-    from io import StringIO
-else:
-    # noinspection PyUnresolvedReferences
-    from cStringIO import StringIO
-
 from asteval import NameFinder, Interpreter, make_symbol_table
 
-import numpy as np
-from numpy.testing import assert_allclose
+
+
+HAS_NUMPY = False
+try:
+    import numpy as np
+    from numpy.testing import assert_allclose
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
 
 
 class TestCase(unittest.TestCase):
@@ -89,20 +83,22 @@ class TestCase(unittest.TestCase):
     def isvalue(self, sym, val):
         """assert that a symboltable symbol has a particular value"""
         tval = self.interp.symtable[sym]
-        if isinstance(val, np.ndarray):
+        if HAS_NUMPY and isinstance(val, np.ndarray):
             assert_allclose(tval, val, rtol=0.01)
         else:
             assert(tval == val)
 
     def isnear(self, expr, val):
         tval = self.interp(expr)
-        assert_allclose(tval, val, rtol=1.e-4, atol=1.e-4)
+        if HAS_NUMPY:
+            assert_allclose(tval, val, rtol=1.e-4, atol=1.e-4)
+
 
     # noinspection PyUnresolvedReferences
     def istrue(self, expr):
         """assert that an expression evaluates to True"""
         val = self.interp(expr)
-        if isinstance(val, np.ndarray):
+        if HAS_NUMPY and isinstance(val, np.ndarray):
             val = np.all(val)
         return self.assertTrue(val)
 
@@ -110,7 +106,7 @@ class TestCase(unittest.TestCase):
     def isfalse(self, expr):
         """assert that an expression evaluates to False"""
         val = self.interp(expr)
-        if isinstance(val, np.ndarray):
+        if HAS_NUMPY and isinstance(val, np.ndarray):
             val = np.all(val)
         return self.assertFalse(val)
 
@@ -166,19 +162,21 @@ class TestEval(TestCase):
 
     def test_ndarray_index(self):
         """nd array indexing"""
-        self.interp("a_ndarray = 5*arange(20)")
-        assert(self.interp("a_ndarray[2]")  == 10)
-        assert(self.interp("a_ndarray[4]")  == 20)
+        if HAS_NUMPY:
+            self.interp("a_ndarray = 5*arange(20)")
+            assert(self.interp("a_ndarray[2]")  == 10)
+            assert(self.interp("a_ndarray[4]")  == 20)
 
     def test_ndarrayslice(self):
         """array slicing"""
-        self.interp("a_ndarray = arange(200).reshape(10, 20)")
-        self.istrue("a_ndarray[1:3,5:7] == array([[25,26], [45,46]])")
-        self.interp("y = arange(20).reshape(4, 5)")
-        self.istrue("y[:,3]  == array([3, 8, 13, 18])")
-        self.istrue("y[...,1]  == array([1, 6, 11, 16])")
-        self.interp("y[...,1] = array([2, 2, 2, 2])")
-        self.istrue("y[1,:] == array([5, 2, 7, 8, 9])")
+        if HAS_NUMPY:
+            self.interp("a_ndarray = arange(200).reshape(10, 20)")
+            self.istrue("a_ndarray[1:3,5:7] == array([[25,26], [45,46]])")
+            self.interp("y = arange(20).reshape(4, 5)")
+            self.istrue("y[:,3]  == array([3, 8, 13, 18])")
+            self.istrue("y[...,1]  == array([1, 6, 11, 16])")
+            self.interp("y[...,1] = array([2, 2, 2, 2])")
+            self.istrue("y[1,:] == array([5, 2, 7, 8, 9])")
 
     def test_while(self):
         """while loops"""
@@ -270,24 +268,41 @@ class TestEval(TestCase):
         """for loops"""
         self.interp(textwrap.dedent("""
             n=0
-            for i in arange(10):
+            for i in range(10):
                 n += i
             """))
         self.isvalue('n', 45)
 
         self.interp(textwrap.dedent("""
             n=0
-            for i in arange(10):
+            for i in range(10):
                 n += i
             else:
                 n = -1
             """))
         self.isvalue('n', -1)
 
+        if HAS_NUMPY:
+            self.interp(textwrap.dedent("""
+                n=0
+                for i in arange(10):
+                    n += i
+                """))
+            self.isvalue('n', 45)
+
+            self.interp(textwrap.dedent("""
+                n=0
+                for i in arange(10):
+                    n += i
+                else:
+                    n = -1
+                """))
+            self.isvalue('n', -1)
+
     def test_for_break(self):
         self.interp(textwrap.dedent("""
             n=0
-            for i in arange(10):
+            for i in range(10):
                 n += i
                 if n > 2:
                     break
@@ -295,6 +310,17 @@ class TestEval(TestCase):
                 n = -1
             """))
         self.isvalue('n', 3)
+        if HAS_NUMPY:
+            self.interp(textwrap.dedent("""
+                n=0
+                for i in arange(10):
+                    n += i
+                    if n > 2:
+                        break
+                else:
+                    n = -1
+                """))
+            self.isvalue('n', 3)
 
     def test_if(self):
         """runtime errors test"""
@@ -355,7 +381,7 @@ class TestEval(TestCase):
             yes = True
             no = False
             nottrue = False
-            a = arange(7)"""))
+            a = range(7)"""))
 
         self.istrue("yes")
         self.isfalse("no")
@@ -398,15 +424,19 @@ class TestEval(TestCase):
         self.isvalue("s1", "a string")
         self.interp('b = (1,2,3)')
         self.isvalue("b", (1, 2, 3))
-        self.interp('a = 1.*arange(10)')
-        self.isvalue("a", np.arange(10))
-        self.interp('a[1:5] = 1 + 0.5 * arange(4)')
-        self.isnear("a", np.array([0., 1., 1.5, 2., 2.5, 5., 6., 7., 8., 9.]))
+        if HAS_NUMPY:
+            self.interp('a = 1.*arange(10)')
+            self.isvalue("a", np.arange(10))
+            self.interp('a[1:5] = 1 + 0.5 * arange(4)')
+            self.isnear("a", np.array([0., 1., 1.5, 2., 2.5, 5., 6., 7., 8., 9.]))
 
     def test_names(self):
         """names test"""
         self.interp('nx = 1')
         self.interp('nx1 = 1')
+        # use \u escape b/c python 2 complains about file encoding
+        self.interp('\u03bb = 1')
+        self.interp('\u03bb1 = 1')
 
     def test_syntaxerrors_1(self):
         """assignment syntax errors test"""
@@ -451,7 +481,7 @@ class TestEval(TestCase):
         self.interp("zero = 0")
         self.interp("astr ='a string'")
         self.interp("atup = ('a', 'b', 11021)")
-        self.interp("arr  = arange(20)")
+        self.interp("arr  = range(20)")
         for expr, errname in (('x = 1/zero', 'ZeroDivisionError'),
                               ('x = zero + nonexistent', 'NameError'),
                               ('x = zero + astr', 'TypeError'),
@@ -473,24 +503,25 @@ class TestEval(TestCase):
     # noinspection PyUnresolvedReferences
     def test_ndarrays(self):
         """simple ndarrays"""
-        self.interp('n = array([11, 10, 9])')
-        self.istrue("isinstance(n, ndarray)")
-        self.istrue("len(n) == 3")
-        self.isvalue("n", np.array([11, 10, 9]))
-        self.interp('n = arange(20).reshape(5, 4)')
-        self.istrue("isinstance(n, ndarray)")
-        self.istrue("n.shape == (5, 4)")
-        self.interp("myx = n.shape")
-        self.interp("n.shape = (4, 5)")
-        self.istrue("n.shape == (4, 5)")
-        self.interp("a = arange(20)")
-        self.interp("gg = a[1:13:3]")
-        self.isvalue('gg', np.array([1, 4, 7, 10]))
-        self.interp("gg[:2] = array([0,2])")
-        self.isvalue('gg', np.array([0, 2, 7, 10]))
-        self.interp('a, b, c, d = gg')
-        self.isvalue('c', 7)
-        self.istrue('(a, b, d) == (0, 2, 10)')
+        if HAS_NUMPY:
+            self.interp('n = array([11, 10, 9])')
+            self.istrue("isinstance(n, ndarray)")
+            self.istrue("len(n) == 3")
+            self.isvalue("n", np.array([11, 10, 9]))
+            self.interp('n = arange(20).reshape(5, 4)')
+            self.istrue("isinstance(n, ndarray)")
+            self.istrue("n.shape == (5, 4)")
+            self.interp("myx = n.shape")
+            self.interp("n.shape = (4, 5)")
+            self.istrue("n.shape == (4, 5)")
+            self.interp("a = arange(20)")
+            self.interp("gg = a[1:13:3]")
+            self.isvalue('gg', np.array([1, 4, 7, 10]))
+            self.interp("gg[:2] = array([0,2])")
+            self.isvalue('gg', np.array([0, 2, 7, 10]))
+            self.interp('a, b, c, d = gg')
+            self.isvalue('c', 7)
+            self.istrue('(a, b, d) == (0, 2, 10)')
 
     def test_binop(self):
         """test binary ops"""
@@ -527,7 +558,8 @@ class TestEval(TestCase):
         self.isnear('sin(pi/2)', 1)
         self.isnear('cos(pi/2)', 0)
         self.istrue('exp(0) == 1')
-        self.isnear('exp(1)', np.e)
+        if HAS_NUMPY:
+            self.isnear('exp(1)', np.e)
 
     def test_namefinder(self):
         """test namefinder"""
@@ -557,17 +589,18 @@ class TestEval(TestCase):
     # noinspection PyUnresolvedReferences
     def test_index_assignment(self):
         """test indexing / subscripting on assignment"""
-        self.interp('x = arange(10)')
-        self.interp('l = [1,2,3,4,5]')
-        self.interp('l[0] = 0')
-        self.interp('l[3] = -1')
-        self.isvalue('l', [0, 2, 3, -1, 5])
-        self.interp('l[0:2] = [-1, -2]')
-        self.isvalue('l', [-1, -2, 3, -1, 5])
-        self.interp('x[1] = 99')
-        self.isvalue('x', np.array([0, 99, 2, 3, 4, 5, 6, 7, 8, 9]))
-        self.interp('x[0:2] = [9,-9]')
-        self.isvalue('x', np.array([9, -9, 2, 3, 4, 5, 6, 7, 8, 9]))
+        if HAS_NUMPY:
+            self.interp('x = arange(10)')
+            self.interp('l = [1,2,3,4,5]')
+            self.interp('l[0] = 0')
+            self.interp('l[3] = -1')
+            self.isvalue('l', [0, 2, 3, -1, 5])
+            self.interp('l[0:2] = [-1, -2]')
+            self.isvalue('l', [-1, -2, 3, -1, 5])
+            self.interp('x[1] = 99')
+            self.isvalue('x', np.array([0, 99, 2, 3, 4, 5, 6, 7, 8, 9]))
+            self.interp('x[0:2] = [9,-9]')
+            self.isvalue('x', np.array([9, -9, 2, 3, 4, 5, 6, 7, 8, 9]))
 
     def test_reservedwords(self):
         """test reserved words"""
@@ -585,7 +618,7 @@ class TestEval(TestCase):
         for w in ('True', 'False'):
             self.interp.error = []
             self.interp("%s= 2" % w)
-            self.check_error('SyntaxError' if PY3 else 'NameError')
+            self.check_error('SyntaxError')
 
         for w in ('eval', '__import__'):
             self.interp.error = []
@@ -820,28 +853,18 @@ class TestEval(TestCase):
         self.interp("1<<1001")
         self.check_error('RuntimeError')
 
+
     def test_safe_open(self):
         self.interp('open("foo1", "wb")')
         self.check_error('RuntimeError')
         self.interp('open("foo2", "rb")')
-        self.check_error('FileNotFoundError' if PY33Plus else 'IOError')
+        self.check_error('FileNotFoundError')
         self.interp('open("foo3", "rb", 2<<18)')
         self.check_error('RuntimeError')
 
     def test_recursionlimit(self):
         self.interp("""def foo(): return foo()\nfoo()""")
-        if PY35Plus:
-            self.check_error('RecursionError')
-        else:
-            self.check_error('RuntimeError')
-
-    def test_runtime(self):
-        self.interp.max_time = 3
-        self.interp("""for x in range(2<<21): pass""")
-        self.check_error('RuntimeError', 'time limit')
-        self.interp("""while True: pass""")
-        self.check_error('RuntimeError', 'time limit')
-
+        self.check_error('RecursionError')
 
     def test_kaboom(self):
         """ test Ned Batchelder's 'Eval really is dangerous' - Kaboom test (and related tests)"""
@@ -852,10 +875,8 @@ class TestEval(TestCase):
 
         self.interp(
             """[print(c) for c in ().__class__.__bases__[0].__subclasses__()]""")  # Try a portion of the kaboom...
-        if PY3:
-            self.check_error('AttributeError', '__class__')  # Safe, unsafe dunders are not supported
-        else:
-            self.check_error('SyntaxError')
+
+        self.check_error('AttributeError', '__class__')  # Safe, unsafe dunders are not supported
         self.interp("9**9**9**9**9**9**9**9")
         self.check_error('RuntimeError')  # Safe, safe_pow() catches this
         self.interp(
@@ -896,38 +917,39 @@ class TestEval(TestCase):
 
     def test_custom_symtable(self):
         "test making and using a custom symbol table"
-        def cosd(x):
-            "cos with angle in degrees"
-            return np.cos(np.radians(x))
 
-        def sind(x):
-            "sin with angle in degrees"
-            return np.sin(np.radians(x))
+        if HAS_NUMPY:
+            def cosd(x):
+                "cos with angle in degrees"
+                return np.cos(np.radians(x))
 
-        def tand(x):
-            "tan with angle in degrees"
-            return np.tan(np.radians(x))
+            def sind(x):
+                "sin with angle in degrees"
+                return np.sin(np.radians(x))
 
-        sym_table = make_symbol_table(cosd=cosd, sind=sind, tand=tand)
+            def tand(x):
+                "tan with angle in degrees"
+                return np.tan(np.radians(x))
 
-        aeval = Interpreter(symtable=sym_table)
-        aeval("x1 = sind(30)")
-        aeval("x2 = cosd(30)")
-        aeval("x3 = tand(45)")
+            sym_table = make_symbol_table(cosd=cosd, sind=sind, tand=tand)
 
-        x1 = aeval.symtable['x1']
-        x2 = aeval.symtable['x2']
-        x3 = aeval.symtable['x3']
+            aeval = Interpreter(symtable=sym_table)
+            aeval("x1 = sind(30)")
+            aeval("x2 = cosd(30)")
+            aeval("x3 = tand(45)")
 
-        assert_allclose(x1, 0.50,     rtol=0.001)
-        assert_allclose(x2, 0.866025, rtol=0.001)
-        assert_allclose(x3, 1.00,     rtol=0.001)
+            x1 = aeval.symtable['x1']
+            x2 = aeval.symtable['x2']
+            x3 = aeval.symtable['x3']
+
+            assert_allclose(x1, 0.50,     rtol=0.001)
+            assert_allclose(x2, 0.866025, rtol=0.001)
+            assert_allclose(x3, 1.00,     rtol=0.001)
 
     def test_readonly_symbols(self):
 
         def foo():
             return 31
-
 
         usersyms = {
             "a": 10,
@@ -976,8 +998,29 @@ class TestEval(TestCase):
         assert(aeval2("abs(-8)") == 8)
 
 
+    def test_chained_compparisons(self):
+        self.interp('a = 7')
+        self.interp('b = 12')
+        self.interp('c = 19')
+        self.interp('d = 30')
+        self.assertTrue(self.interp('a < b < c < d'))
+        self.assertFalse(self.interp('a < b < c/88 < d'))
+        self.assertFalse(self.interp('a < b < c < d/2'))
 
+    def test_array_compparisons(self):
+        if HAS_NUMPY:
+            self.interp("sarr = arange(8)")
+            sarr = np.arange(8)
+            o1 = self.interp("sarr < 4.3")
+            assert(np.all(o1 == (sarr < 4.3)))
+            o1 = self.interp("sarr == 4")
+            assert(np.all(o1 == (sarr == 4)))
 
+    def test_minimal(self):
+        aeval = Interpreter(builtins_readonly=True, minimal=True)
+        aeval("a_dict = {'a': 1, 'b': 2, 'c': 3, 'd': 4}")
+        self.assertTrue(aeval("a_dict['a'] == 1"))
+        self.assertTrue(aeval("a_dict['c'] == 3"))
 
 class TestCase2(unittest.TestCase):
     def test_stringio(self):

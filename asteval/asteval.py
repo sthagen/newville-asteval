@@ -36,19 +36,17 @@ In addition, while many builtin functions are supported, several builtin
 functions that are considered unsafe are missing ('eval', 'exec', and
 'getattr' for example)
 """
-
-from __future__ import division, print_function
-
 import ast
 import time
 import inspect
 from sys import exc_info, stdout, stderr, version_info
 
-import six
-
 from .astutils import (UNSAFE_ATTRS, HAS_NUMPY, make_symbol_table, numpy,
                        op2func, ExceptionHolder, ReturnedNone,
                        valid_symbol_name)
+
+if version_info[0] < 3 or version_info[1] < 5:
+    raise SystemError("Python 3.5 or higher required")
 
 builtins = __builtins__
 if not isinstance(builtins, dict):
@@ -59,10 +57,8 @@ ALL_NODES = ['arg', 'assert', 'assign', 'attribute', 'augassign', 'binop',
              'dict', 'ellipsis', 'excepthandler', 'expr', 'extslice',
              'for', 'functiondef', 'if', 'ifexp', 'index', 'interrupt',
              'list', 'listcomp', 'module', 'name', 'nameconstant', 'num',
-             'pass', 'print', 'raise', 'repr', 'return', 'slice', 'str',
-             'subscript', 'try', 'tuple', 'unaryop', 'while']
-
-ERR_MAX_TIME = "Execution exceeded time limit, max runtime is {}s"
+             'pass', 'raise', 'repr', 'return', 'slice', 'str',
+             'subscript', 'try', 'tuple', 'unaryop', 'while', 'constant']
 
 class Interpreter(object):
     """create an asteval Interpreter: a restricted, simplified interpreter
@@ -106,8 +102,6 @@ class Interpreter(object):
         whether to support `raise`.
     no_print : bool
         whether to support `print`.
-    max_time : float
-        deprecated, unreliable. max_time will be dropped soon. (default 86400)
     readonly_symbols : iterable or `None`
         symbols that the user can not assign to
     builtins_readonly : bool
@@ -117,7 +111,6 @@ class Interpreter(object):
     -----
     1. setting `minimal=True` is equivalent to setting all
        `no_***` options to `True`.
-    2. max_time is not reliable and no longer supported -- the keyword will be dropped soon.
     """
 
     def __init__(self, symtable=None, usersyms=None, writer=None,
@@ -125,7 +118,7 @@ class Interpreter(object):
                  no_if=False, no_for=False, no_while=False, no_try=False,
                  no_functiondef=False, no_ifexp=False, no_listcomp=False,
                  no_augassign=False, no_assert=False, no_delete=False,
-                 no_raise=False, no_print=False, max_time=86400,
+                 no_raise=False, no_print=False, max_time=None,
                  readonly_symbols=None, builtins_readonly=False):
 
         self.writer = writer or stdout
@@ -136,8 +129,6 @@ class Interpreter(object):
                 usersyms = {}
             symtable = make_symbol_table(use_numpy=use_numpy, **usersyms)
 
-        symtable['print'] = self._printer
-
         self.symtable = symtable
         self._interrupt = None
         self.error = []
@@ -146,8 +137,10 @@ class Interpreter(object):
         self.retval = None
         self.lineno = 0
         self.start_time = time.time()
-        self.max_time = max_time
         self.use_numpy = HAS_NUMPY and use_numpy
+
+        symtable['print'] = self._printer
+        self.no_print = no_print or minimal
 
         nodes = ALL_NODES[:]
 
@@ -169,8 +162,6 @@ class Interpreter(object):
             nodes.remove('delete')
         if minimal or no_raise:
             nodes.remove('raise')
-        if minimal or no_print:
-            nodes.remove('print')
         if minimal or no_listcomp:
             nodes.remove('listcomp')
         if minimal or no_augassign:
@@ -280,8 +271,6 @@ class Interpreter(object):
         """Execute parsed Ast representation for an expression."""
         # Note: keep the 'node is None' test: internal code here may run
         #    run(None) and expect a None in return.
-        if time.time() - self.start_time > self.max_time:
-            raise RuntimeError(ERR_MAX_TIME.format(self.max_time))
         out = None
         if len(self.error) > 0:
             return out
@@ -310,7 +299,10 @@ class Interpreter(object):
             return ret
         except:
             if with_raise:
-                self.raise_exception(node, expr=expr)
+                if len(self.error) == 0:
+                    # Unhandled exception that didn't go through raise_exception
+                    self.raise_exception(node, expr=expr)
+                raise
 
     def __call__(self, expr, **kw):
         """Call class instance as function."""
@@ -426,6 +418,10 @@ class Interpreter(object):
         """Dictionary."""
         return dict([(self.run(k), self.run(v)) for k, v in
                      zip(node.keys, node.values)])
+
+    def on_constant(self, node):   # ('value', 'kind')
+        """Return constant value."""
+        return node.value
 
     def on_num(self, node):   # ('n',)
         """Return number."""
@@ -595,36 +591,28 @@ class Interpreter(object):
         return val
 
     def on_compare(self, node):  # ('left', 'ops', 'comparators')
-        """comparison operators"""
+        """comparison operators, including chained comparisons (a<b<c)"""
         lval = self.run(node.left)
-        out = True
+        results = []
         for op, rnode in zip(node.ops, node.comparators):
             rval = self.run(rnode)
-            out = op2func(op)(lval, rval)
+            ret = op2func(op)(lval, rval)
+            results.append(ret)
+            if (self.use_numpy and not isinstance(ret, numpy.ndarray)) and not ret:
+                break
             lval = rval
-            if self.use_numpy and isinstance(out, numpy.ndarray) and out.any():
-                break
-            elif not out:
-                break
+        if len(results) == 1:
+            return results[0]
+        else:
+            out = True
+            for r in results:
+                out = out and r
         return out
-
-    def on_print(self, node):    # ('dest', 'values', 'nl')
-        """Note: implements Python2 style print statement, not print()
-        function.
-
-        May need improvement....
-
-        """
-        dest = self.run(node.dest) or self.writer
-        end = ''
-        if node.nl:
-            end = '\n'
-        out = [self.run(tnode) for tnode in node.values]
-        if out and len(self.error) == 0:
-            self._printer(*out, file=dest, end=end)
 
     def _printer(self, *out, **kws):
         """Generic print function."""
+        if self.no_print:
+            return
         flush = kws.pop('flush', True)
         fileh = kws.pop('file', self.writer)
         sep = kws.pop('sep', ' ')
@@ -728,12 +716,8 @@ class Interpreter(object):
 
     def on_raise(self, node):    # ('type', 'inst', 'tback')
         """Raise statement: note difference for python 2 and 3."""
-        if version_info[0] == 3:
-            excnode = node.exc
-            msgnode = node.cause
-        else:
-            excnode = node.type
-            msgnode = node.inst
+        excnode = node.exc
+        msgnode = node.cause
         out = self.run(excnode)
         msg = ' '.join(out.args)
         msg2 = self.run(msgnode)
@@ -755,7 +739,7 @@ class Interpreter(object):
             args = args + self.run(starargs)
 
         keywords = {}
-        if six.PY3 and func == print:
+        if func == print:
             keywords['file'] = self.writer
 
         for key in node.keywords:
@@ -796,11 +780,7 @@ class Interpreter(object):
             keyval = self.run(node.args.args[idef+offset])
             kwargs.append((keyval, defval))
 
-        if version_info[0] == 3:
-            args = [tnode.arg for tnode in node.args.args[:offset]]
-        else:
-            args = [tnode.id for tnode in node.args.args[:offset]]
-
+        args = [tnode.arg for tnode in node.args.args[:offset]]
         doc = None
         nb0 = node.body[0]
         if isinstance(nb0, ast.Expr) and isinstance(nb0.value, ast.Str):
@@ -808,11 +788,10 @@ class Interpreter(object):
 
         varkws = node.args.kwarg
         vararg = node.args.vararg
-        if version_info[0] == 3:
-            if isinstance(vararg, ast.arg):
-                vararg = vararg.arg
-            if isinstance(varkws, ast.arg):
-                varkws = varkws.arg
+        if isinstance(vararg, ast.arg):
+            vararg = vararg.arg
+        if isinstance(varkws, ast.arg):
+            varkws = varkws.arg
 
         self.symtable[node.name] = Procedure(node.name, self, doc=doc,
                                              lineno=self.lineno,

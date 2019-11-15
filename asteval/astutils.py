@@ -4,16 +4,21 @@ utility functions for asteval
    Matthew Newville <newville@cars.uchicago.edu>,
    The University of Chicago
 """
-from __future__ import division, print_function
+import io
 import re
 import ast
 import math
+import numbers
 from sys import exc_info
+from tokenize import (tokenize as generate_tokens,
+                      ENCODING as tk_ENCODING,
+                      NAME as tk_NAME)
 
 HAS_NUMPY = False
 numpy = None
 try:
     import numpy
+    ndarr = numpy.ndarray
     HAS_NUMPY = True
 except ImportError:
     pass
@@ -174,8 +179,13 @@ LOCALFUNCS = {'open': _open, 'type': _type}
 
 def safe_pow(base, exp):
     """safe version of pow"""
-    if exp > MAX_EXPONENT:
-        raise RuntimeError("Invalid exponent, max exponent is {}".format(MAX_EXPONENT))
+    if isinstance(exp, numbers.Number):
+        if exp > MAX_EXPONENT:
+            raise RuntimeError("Invalid exponent, max exponent is {}".format(MAX_EXPONENT))
+    elif HAS_NUMPY:
+        if isinstance(exp, numpy.ndarray):
+            if numpy.nanmax(exp) > MAX_EXPONENT:
+                raise RuntimeError("Invalid exponent, max exponent is {}".format(MAX_EXPONENT))
     return base ** exp
 
 
@@ -195,8 +205,13 @@ def safe_add(a, b):
 
 def safe_lshift(a, b):
     """safe version of lshift"""
-    if b > MAX_SHIFT:
-        raise RuntimeError("Invalid left shift, max left shift is {}".format(MAX_SHIFT))
+    if isinstance(b, numbers.Number):
+        if b > MAX_SHIFT:
+            raise RuntimeError("Invalid left shift, max left shift is {}".format(MAX_SHIFT))
+    elif HAS_NUMPY:
+        if isinstance(b, numpy.ndarray):
+            if numpy.nanmax(b) > MAX_SHIFT:
+                raise RuntimeError("Invalid left shift, max left shift is {}".format(MAX_SHIFT))
     return a << b
 
 
@@ -248,7 +263,12 @@ def valid_symbol_name(name):
     """
     if name in RESERVED_WORDS:
         return False
-    return NAME_MATCH(name) is not None
+
+    gen = generate_tokens(io.BytesIO(name.encode('utf-8')).readline)
+    typ, _, start, end, _ = next(gen)
+    if typ == tk_ENCODING:
+        typ, _, start, end, _ = next(gen)
+    return typ == tk_NAME and start == (1, 0) and end == (1, len(name))
 
 
 def op2func(op):
@@ -284,7 +304,7 @@ class ExceptionHolder(object):
         self.exc_info = exc_info()
         if self.exc is None and self.exc_info[0] is not None:
             self.exc = self.exc_info[0]
-        if self.msg is '' and self.exc_info[1] is not None:
+        if self.msg == '' and self.exc_info[1] is not None:
             self.msg = self.exc_info[1]
 
     def get_error(self):
