@@ -17,7 +17,7 @@ compiled into ast node and then evaluated later, using the current values
 in the symbol table.
 
 The result is a restricted, simplified version of Python meant for
-numerical caclulations that is somewhat safer than 'eval' because many
+numerical calculations that is somewhat safer than 'eval' because many
 unsafe operations (such as 'import' and 'eval') are simply not allowed.
 
 Many parts of Python syntax are supported, including:
@@ -37,20 +37,12 @@ functions that are considered unsafe are missing ('eval', 'exec', and
 'getattr' for example)
 """
 import ast
-import time
 import inspect
-from sys import exc_info, stdout, stderr, version_info
+import time
+from sys import exc_info, stderr, stdout
 
-from .astutils import (UNSAFE_ATTRS, HAS_NUMPY, make_symbol_table, numpy,
-                       op2func, ExceptionHolder, ReturnedNone,
-                       valid_symbol_name)
-
-if version_info[0] < 3 or version_info[1] < 5:
-    raise SystemError("Python 3.5 or higher required")
-
-builtins = __builtins__
-if not isinstance(builtins, dict):
-    builtins = builtins.__dict__
+from .astutils import (HAS_NUMPY, UNSAFE_ATTRS, ExceptionHolder, ReturnedNone,
+                       make_symbol_table, numpy, op2func, valid_symbol_name)
 
 ALL_NODES = ['arg', 'assert', 'assign', 'attribute', 'augassign', 'binop',
              'boolop', 'break', 'call', 'compare', 'continue', 'delete',
@@ -60,7 +52,8 @@ ALL_NODES = ['arg', 'assert', 'assign', 'attribute', 'augassign', 'binop',
              'pass', 'raise', 'repr', 'return', 'slice', 'str',
              'subscript', 'try', 'tuple', 'unaryop', 'while', 'constant']
 
-class Interpreter(object):
+
+class Interpreter:
     """create an asteval Interpreter: a restricted, simplified interpreter
     of mathematical expressions using Python syntax.
 
@@ -93,7 +86,7 @@ class Interpreter(object):
     no_listcomp : bool
         whether to support list comprehension.
     no_augassign : bool
-        whether to support augemented assigments (`a += 1`, etc).
+        whether to support augemented assignments (`a += 1`, etc).
     no_assert : bool
         whether to support `assert`.
     no_delete : bool
@@ -203,7 +196,6 @@ class Interpreter(object):
         """set node handler"""
         self.node_handlers[node] = handler
 
-
     def user_defined_symbols(self):
         """Return a set of symbols that have been added to symtable after
         construction.
@@ -238,7 +230,7 @@ class Interpreter(object):
         if len(self.error) > 0 and not isinstance(node, ast.Module):
             msg = '%s' % msg
         err = ExceptionHolder(node, exc=exc, msg=msg, expr=expr, lineno=lineno)
-        self._interrupt = ast.Break()
+        self._interrupt = ast.Raise()
         self.error.append(err)
         if self.error_msg is None:
             self.error_msg = "at expr='%s'" % (self.expr)
@@ -274,6 +266,10 @@ class Interpreter(object):
         out = None
         if len(self.error) > 0:
             return out
+        if self.retval is not None:
+            return self.retval
+        if isinstance(self._interrupt, (ast.Break, ast.Continue)):
+            return self._interrupt
         if node is None:
             return out
         if isinstance(node, str):
@@ -300,7 +296,7 @@ class Interpreter(object):
         except:
             if with_raise:
                 if len(self.error) == 0:
-                    # Unhandled exception that didn't go through raise_exception
+                    # Unhandled exception that didn't use raise_exception
                     self.raise_exception(node, expr=expr)
                 raise
 
@@ -357,7 +353,7 @@ class Interpreter(object):
         return self.run(node.value)  # ('value',)
 
     def on_return(self, node):  # ('value',)
-        """Return statement: look for None, return special sentinal."""
+        """Return statement: look for None, return special sentinel."""
         self.retval = self.run(node.value)
         if self.retval is None:
             self.retval = ReturnedNone
@@ -376,7 +372,7 @@ class Interpreter(object):
 
     def on_expression(self, node):
         "basic expression"
-        return self.on_module(node) # ():('body',)
+        return self.on_module(node)  # ():('body',)
 
     def on_pass(self, node):
         """Pass statement."""
@@ -403,7 +399,8 @@ class Interpreter(object):
     def on_assert(self, node):    # ('test', 'msg')
         """Assert statement."""
         if not self.run(node.test):
-            self.raise_exception(node, exc=AssertionError, msg=node.msg)
+            msg = node.msg.s if node.msg else ""
+            self.raise_exception(node, exc=AssertionError, msg=msg)
         return True
 
     def on_list(self, node):    # ('elt', 'ctx')
@@ -416,8 +413,8 @@ class Interpreter(object):
 
     def on_dict(self, node):    # ('keys', 'values')
         """Dictionary."""
-        return dict([(self.run(k), self.run(v)) for k, v in
-                     zip(node.keys, node.values)])
+        return {self.run(k): self.run(v) for k, v in
+                zip(node.keys, node.values)}
 
     def on_constant(self, node):   # ('value', 'kind')
         """Return constant value."""
@@ -430,10 +427,6 @@ class Interpreter(object):
     def on_str(self, node):   # ('s',)
         """Return string."""
         return node.s
-
-    def on_nameconstant(self, node):   # ('value',)
-        """named constant"""
-        return node.value
 
     def on_name(self, node):    # ('id', 'ctx')
         """Name node."""
@@ -448,7 +441,7 @@ class Interpreter(object):
                 self.raise_exception(node, exc=NameError, msg=msg)
 
     def on_nameconstant(self, node):
-        """ True, False, None in python >= 3.4 """
+        """True, False, or None"""
         return node.value
 
     def node_assign(self, node, val):
@@ -459,7 +452,8 @@ class Interpreter(object):
 
         """
         if node.__class__ == ast.Name:
-            if not valid_symbol_name(node.id) or node.id in self.readonly_symbols:
+            if (not valid_symbol_name(node.id) or
+                    node.id in self.readonly_symbols):
                 errmsg = "invalid symbol name (reserved word?) %s" % node.id
                 self.raise_exception(node, exc=NameError, msg=errmsg)
             self.symtable[node.id] = val
@@ -474,14 +468,8 @@ class Interpreter(object):
             setattr(self.run(node.value), node.attr, val)
 
         elif node.__class__ == ast.Subscript:
-            sym = self.run(node.value)
-            xslice = self.run(node.slice)
-            if isinstance(node.slice, ast.Index):
-                sym[xslice] = val
-            elif isinstance(node.slice, ast.Slice):
-                sym[slice(xslice.start, xslice.stop)] = val
-            elif isinstance(node.slice, ast.ExtSlice):
-                sym[xslice] = val
+            self.run(node.value)[self.run(node.slice)] = val
+
         elif node.__class__ in (ast.Tuple, ast.List):
             if len(val) == len(node.elts):
                 for telem, tval in zip(node.elts, val):
@@ -501,17 +489,16 @@ class Interpreter(object):
             return delattr(sym, node.attr)
 
         # ctx is ast.Load
-        fmt = "cannnot access attribute '%s' for %s"
-        if node.attr not in UNSAFE_ATTRS:
-            fmt = "no attribute '%s' for %s"
+        if not (node.attr in UNSAFE_ATTRS or
+                (node.attr.startswith('__') and
+                 node.attr.endswith('__'))):
             try:
                 return getattr(sym, node.attr)
             except AttributeError:
                 pass
 
         # AttributeError or accessed unsafe attribute
-        obj = self.run(node.value)
-        msg = fmt % (node.attr, obj)
+        msg = "no attribute '%s' for %s" % (node.attr, self.run(node.value))
         self.raise_exception(node, exc=AttributeError, msg=msg)
 
     def on_assign(self, node):    # ('targets', 'value')
@@ -544,10 +531,7 @@ class Interpreter(object):
         nslice = self.run(node.slice)
         ctx = node.ctx.__class__
         if ctx in (ast.Load, ast.Store):
-            if isinstance(node.slice, (ast.Index, ast.Slice, ast.Ellipsis)):
-                return val.__getitem__(nslice)
-            elif isinstance(node.slice, ast.ExtSlice):
-                return val[nslice]
+            return val[nslice]
         else:
             msg = "subscript with unknown context"
             self.raise_exception(node, msg=msg)
@@ -561,8 +545,8 @@ class Interpreter(object):
             while tnode.__class__ == ast.Attribute:
                 children.append(tnode.attr)
                 tnode = tnode.value
-
-            if tnode.__class__ == ast.Name and tnode.id not in self.readonly_symbols:
+            if (tnode.__class__ == ast.Name and
+                    tnode.id not in self.readonly_symbols):
                 children.append(tnode.id)
                 children.reverse()
                 self.symtable.pop('.'.join(children))
@@ -598,7 +582,8 @@ class Interpreter(object):
             rval = self.run(rnode)
             ret = op2func(op)(lval, rval)
             results.append(ret)
-            if (self.use_numpy and not isinstance(ret, numpy.ndarray)) and not ret:
+            if ((self.use_numpy and not isinstance(ret, numpy.ndarray)) and
+                    not ret):
                 break
             lval = rval
         if len(results) == 1:
@@ -697,7 +682,7 @@ class Interpreter(object):
                 for hnd in node.handlers:
                     htype = None
                     if hnd.type is not None:
-                        htype = builtins.get(hnd.type.id, None)
+                        htype = __builtins__.get(hnd.type.id, None)
                     if htype is None or isinstance(e_type(), htype):
                         self.error = []
                         if hnd.name is not None:
@@ -741,23 +726,31 @@ class Interpreter(object):
         keywords = {}
         if func == print:
             keywords['file'] = self.writer
-
         for key in node.keywords:
             if not isinstance(key, ast.keyword):
                 msg = "keyword error in function call '%s'" % (func)
                 self.raise_exception(node, msg=msg)
-            keywords[key.arg] = self.run(key.value)
+            if key.arg is None:
+                keywords.update(self.run(key.value))
+            elif key.arg in keywords:
+                self.raise_exception(node,
+                                     msg="keyword argument repeated: %s" % key.arg,
+                                     exc=SyntaxError)
+            else:
+                keywords[key.arg] = self.run(key.value)
 
         kwargs = getattr(node, 'kwargs', None)
+
         if kwargs is not None:
             keywords.update(self.run(kwargs))
 
         try:
             return func(*args, **keywords)
         except Exception as ex:
+            func_name = getattr(func, '__name__', str(func))
             self.raise_exception(
                 node, msg="Error running function call '%s' with args %s and "
-                "kwargs %s: %s" % (func.__name__, args, keywords, ex))
+                "kwargs %s: %s" % (func_name, args, keywords, ex))
 
     def on_arg(self, node):    # ('test', 'msg')
         """Arg for function definitions."""
@@ -770,7 +763,8 @@ class Interpreter(object):
             raise Warning("decorated procedures not supported!")
         kwargs = []
 
-        if not valid_symbol_name(node.name) or node.name in self.readonly_symbols:
+        if (not valid_symbol_name(node.name) or
+                node.name in self.readonly_symbols):
             errmsg = "invalid function name (reserved word?) %s" % node.name
             self.raise_exception(node, exc=NameError, msg=errmsg)
 
@@ -802,7 +796,7 @@ class Interpreter(object):
             self.no_deepcopy.remove(node.name)
 
 
-class Procedure(object):
+class Procedure:
     """Procedure: user-defined function for asteval.
 
     This stores the parsed ast nodes as from the 'functiondef' ast node

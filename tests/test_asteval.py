@@ -3,19 +3,19 @@
 Base TestCase for asteval
 """
 import ast
+import math
 import os
 import textwrap
 import time
 import unittest
-import pytest
+from functools import partial
 from io import StringIO
-
 from sys import version_info
 from tempfile import NamedTemporaryFile
 
-from asteval import NameFinder, Interpreter, make_symbol_table
+import pytest
 
-
+from asteval import Interpreter, NameFinder, make_symbol_table
 
 HAS_NUMPY = False
 try:
@@ -24,6 +24,9 @@ try:
     HAS_NUMPY = True
 except ImportError:
     HAS_NUMPY = False
+
+
+version_info = (version_info.major, version_info.minor)
 
 
 class TestCase(unittest.TestCase):
@@ -93,7 +96,6 @@ class TestCase(unittest.TestCase):
         if HAS_NUMPY:
             assert_allclose(tval, val, rtol=1.e-4, atol=1.e-4)
 
-
     # noinspection PyUnresolvedReferences
     def istrue(self, expr):
         """assert that an expression evaluates to True"""
@@ -139,6 +141,20 @@ class TestEval(TestCase):
         self.istrue("a_dict['a'] == 1")
         self.istrue("a_dict['d'] == 4")
 
+    def test_dict_set_index(self):
+        """dictionary indexing"""
+        self.interp("a_dict = {'a': 1, 'b': 2, 'c': 3, 'd': 4}")
+        self.interp("a_dict['a'] = -4")
+        self.interp("a_dict['e'] = 73")
+
+        self.istrue("a_dict['a'] == -4")
+        self.istrue("a_dict['e'] == 73")
+
+        self.interp("b_dict = {}")
+        self.interp("keyname = 'a'")
+        self.interp("b_dict[keyname] = (1, -1, 'x')")
+        self.istrue("b_dict[keyname] ==  (1, -1, 'x')")
+
     def test_list_index(self):
         """list indexing"""
         self.interp("a_list = ['a', 'b', 'c', 'd', 'o']")
@@ -164,8 +180,8 @@ class TestEval(TestCase):
         """nd array indexing"""
         if HAS_NUMPY:
             self.interp("a_ndarray = 5*arange(20)")
-            assert(self.interp("a_ndarray[2]")  == 10)
-            assert(self.interp("a_ndarray[4]")  == 20)
+            assert(self.interp("a_ndarray[2]") == 10)
+            assert(self.interp("a_ndarray[4]") == 20)
 
     def test_ndarrayslice(self):
         """array slicing"""
@@ -175,6 +191,7 @@ class TestEval(TestCase):
             self.interp("y = arange(20).reshape(4, 5)")
             self.istrue("y[:,3]  == array([3, 8, 13, 18])")
             self.istrue("y[...,1]  == array([1, 6, 11, 16])")
+            self.istrue("y[1,:] == array([5, 6, 7, 8, 9])")
             self.interp("y[...,1] = array([2, 2, 2, 2])")
             self.istrue("y[1,:] == array([5, 2, 7, 8, 9])")
 
@@ -263,6 +280,8 @@ class TestEval(TestCase):
         self.check_error(None)
         self.interp('assert n==7')
         self.check_error('AssertionError')
+        self.interp('assert n==7, "no match"')
+        self.check_error('AssertionError', 'no match')
 
     def test_for(self):
         """for loops"""
@@ -729,7 +748,7 @@ class TestEval(TestCase):
         """test function with kw args, no **kws"""
         self.interp(textwrap.dedent("""
             def fcn(x=0, y=0, z=0, t=0, square=False):
-                'test varargs function'
+                'test kwargs function'
                 out = 0
                 for i in (x, y, z, t):
                     if square:
@@ -802,8 +821,25 @@ class TestEval(TestCase):
         self.interp("o = fcn(1, x=2)")
         self.check_error('TypeError')
 
+    def test_kwargx(self):
+        """test passing and chaining in **kwargs"""
+        self.interp(textwrap.dedent("""
+            def inner(foo=None, bar=None):
+                return (foo, bar)
+
+            def outer(**kwargs):
+                return inner(**kwargs)
+            """))
+
+        ret = self.interp("inner(foo='a', bar=2)")
+        assert(ret == ('a', 2))
+        ret = self.interp("outer(foo='a', bar=7)")
+        assert(ret == ('a', 7))
+        ret = self.interp("outer(**dict(foo='b', bar=3))")
+        assert(ret == ('b', 3))
+
     def test_nested_functions(self):
-        setup="""
+        setup = """
         def a(x=10):
             if x > 5:
                 return 1
@@ -822,7 +858,6 @@ class TestEval(TestCase):
         self.interp("o2 = c(x=0)")
         self.isvalue('o1', 3.5)
         self.isvalue('o2', 1.5)
-
 
     def test_astdump(self):
         """test ast parsing and dumping"""
@@ -853,7 +888,6 @@ class TestEval(TestCase):
         self.interp("1<<1001")
         self.check_error('RuntimeError')
 
-
     def test_safe_open(self):
         self.interp('open("foo1", "wb")')
         self.check_error('RuntimeError')
@@ -880,8 +914,12 @@ class TestEval(TestCase):
         self.interp("9**9**9**9**9**9**9**9")
         self.check_error('RuntimeError')  # Safe, safe_pow() catches this
         self.interp(
-            "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))")
-        self.check_error('MemoryError')  # Hmmm, this is caught, but its still concerning...
+            "x = ((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))")
+        if version_info == (3, 9):
+            self.isvalue('x', 1)
+            self.check_error(None)
+        else:
+            self.check_error('MemoryError')  # Hmmm, this is caught, but its still concerning...
         self.interp("compile('xxx')")
         self.check_error('NameError')  # Safe, compile() is not supported
 
@@ -942,9 +980,9 @@ class TestEval(TestCase):
             x2 = aeval.symtable['x2']
             x3 = aeval.symtable['x3']
 
-            assert_allclose(x1, 0.50,     rtol=0.001)
+            assert_allclose(x1, 0.50, rtol=0.001)
             assert_allclose(x2, 0.866025, rtol=0.001)
-            assert_allclose(x3, 1.00,     rtol=0.001)
+            assert_allclose(x3, 1.00, rtol=0.001)
 
     def test_readonly_symbols(self):
 
@@ -982,7 +1020,6 @@ class TestEval(TestCase):
         assert(aeval("x") == 21)
         assert(aeval("y") == 17)
 
-
         assert(aeval("abs(8)") == 8)
         assert(aeval("abs(-8)") == 8)
         aeval("def abs(x): return x*2")
@@ -996,7 +1033,6 @@ class TestEval(TestCase):
         aeval2("def abs(x): return x*2")
         assert(aeval2("abs(8)") == 8)
         assert(aeval2("abs(-8)") == 8)
-
 
     def test_chained_compparisons(self):
         self.interp('a = 7')
@@ -1022,6 +1058,46 @@ class TestEval(TestCase):
         self.assertTrue(aeval("a_dict['a'] == 1"))
         self.assertTrue(aeval("a_dict['c'] == 3"))
 
+    def test_partial_exception(self):
+        sym_table = make_symbol_table(sqrt=partial(math.sqrt))
+
+        aeval = Interpreter(symtable=sym_table)
+
+        assert aeval("sqrt(4)") == 2
+
+        # Calling sqrt(-1) should raise a ValueError. When the interpreter
+        # encounters an exception, it attempts to form an error string that
+        # uses the function's __name__ attribute. Partials don't have a
+        # __name__ attribute, so we want to make sure that an AttributeError is
+        # not raised.
+
+        result = aeval("sqrt(-1)")
+        assert aeval.error.pop().exc == ValueError
+
+    def test_inner_return(self):
+        self.interp(textwrap.dedent("""
+            def func():
+                loop_cnt = 0
+                for i in range(5):
+                    for k in range(5):
+                        loop_cnt += 1
+                    return (i, k, loop_cnt)
+        """))
+        out = self.interp("func()")
+        assert out == (0, 4, 5)
+
+    def test_nested_break(self):
+        self.interp(textwrap.dedent("""
+        def func_w():
+            for k in range(5):
+                if k == 4:
+                    break
+                    k = 100
+            return k
+        """))
+        assert 4 == self.interp("func_w()")
+
+
 class TestCase2(unittest.TestCase):
     def test_stringio(self):
         """ test using stringio for output/errors """
@@ -1030,6 +1106,7 @@ class TestCase2(unittest.TestCase):
         intrep = Interpreter(writer=out, err_writer=err)
         intrep("print('out')")
         self.assertEqual(out.getvalue(), 'out\n')
+
 
 if __name__ == '__main__':
     pytest.main(['-v', '-x', '-s'])
