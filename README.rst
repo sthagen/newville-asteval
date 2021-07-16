@@ -1,8 +1,8 @@
 ASTEVAL
 =======
 
-.. image:: https://travis-ci.org/newville/asteval.png
-   :target: https://travis-ci.org/newville/asteval
+.. image::  https://github.com/newville/asteval/actions/workflows/test-python.yml/badge.svg
+   :target: https://github.com/newville/asteval/actions/workflows/test-python.yml
 
 .. image:: https://codecov.io/gh/newville/asteval/branch/master/graph/badge.svg
    :target: https://codecov.io/gh/newville/asteval
@@ -12,6 +12,9 @@ ASTEVAL
 
 .. image:: https://img.shields.io/pypi/dm/asteval.svg
    :target: https://pypi.org/project/asteval
+
+.. image:: https://img.shields.io/badge/docs-read-brightgreen
+   :target: https://newville.github.io/asteval/
 
 .. image:: https://zenodo.org/badge/4185/newville/asteval.svg
    :target: https://zenodo.org/badge/latestdoi/4185/newville/asteval
