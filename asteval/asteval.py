@@ -37,6 +37,7 @@ functions that are considered unsafe are missing ('eval', 'exec', and
 'getattr' for example)
 """
 import ast
+import copy
 import inspect
 import time
 from sys import exc_info, stderr, stdout
@@ -238,7 +239,7 @@ class Interpreter:
         self._interrupt = ast.Raise()
         self.error.append(err)
         if self.error_msg is None:
-            self.error_msg = "at expr='%s'" % (self.expr)
+            self.error_msg = (' '.join([msg, "at expr='%s'" % (self.expr)])).strip()
         elif len(msg) > 0:
             self.error_msg = msg
         if exc is None:
@@ -675,18 +676,79 @@ class Interpreter:
         self._interrupt = None
 
     def on_listcomp(self, node):    # ('elt', 'generators')
-        """List comprehension."""
+        """List comprehension -- only up to 4 generators!"""
         out = []
+        locals = {}
+        saved_syms = {}
+
         for tnode in node.generators:
             if tnode.__class__ == ast.comprehension:
+                if tnode.target.__class__ == ast.Name:
+                    if (not valid_symbol_name(tnode.target.id) or
+                        tnode.target.id in self.readonly_symbols):
+                        errmsg = "invalid symbol name (reserved word?) %s" % tnode.target.id
+                        self.raise_exception(tnode.target, exc=NameError, msg=errmsg)
+                    locals[tnode.target.id] = []
+                    if tnode.target.id in self.symtable:
+                        saved_syms[tnode.target.id] = copy.deepcopy(self.symtable[tnode.target.id])
+
+                elif tnode.target.__class__ == ast.Tuple:
+                    target = []
+                    for tval in tnode.target.elts:
+                        locals[tval.id] = []
+                        if tval.id in self.symtable:
+                            saved_syms[tval.id] = copy.deepcopy(self.symtable[tval.id])
+
+        for tnode in node.generators:
+            if tnode.__class__ == ast.comprehension:
+                tlist = []
+                ttype = 'name'
+                if tnode.target.__class__ == ast.Name:
+                    if (not valid_symbol_name(tnode.target.id) or
+                        tnode.target.id in self.readonly_symbols):
+                        errmsg = "invalid symbol name (reserved word?) %s" % tnode.target.id
+                        self.raise_exception(tnode.target, exc=NameError, msg=errmsg)
+                    ttype, target = 'name', tnode.target.id
+                elif tnode.target.__class__ == ast.Tuple:
+                    ttype = 'tuple'
+                    target =tuple([tval.id for tval in tnode.target.elts])
+
                 for val in self.run(tnode.iter):
-                    self.node_assign(tnode.target, val)
+                    if ttype == 'name':
+                        self.symtable[target] = val
+                    else:
+                        for telem, tval in zip(target, val):
+                            self.symtable[target] = val
+
                     add = True
                     for cond in tnode.ifs:
                         add = add and self.run(cond)
                     if add:
-                        out.append(self.run(node.elt))
+                        if ttype == 'name':
+                            locals[target].append(val)
+                        else:
+                            for telem, tval in zip(target, val):
+                                locals[telem].append(tval)
+
+        def listcomp_recurse(i, names, data):
+            if i == len(names):
+                out.append(self.run(node.elt))
+                return
+
+            for val in data[i]:
+                self.symtable[names[i]] = val
+                listcomp_recurse(i+1, names, data)
+
+        names = list(locals.keys())
+        data = list(locals.values())
+
+        listcomp_recurse(0, names, data)
+
+        for name, val in saved_syms.items():
+            self.symtable[name] = val
+
         return out
+
 
     def on_excepthandler(self, node):  # ('type', 'name', 'body')
         """Exception handler..."""
