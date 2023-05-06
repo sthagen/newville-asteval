@@ -1,16 +1,16 @@
 #!/usr/bin/env python
-"""Safe(ish) evaluation of mathematical expression using Python's ast
-module.
+"""
+Safe(ish) evaluation of minimal Python code using Python's ast module.
 
 This module provides an Interpreter class that compiles a restricted set of
 Python expressions and statements to Python's AST representation, and then
 executes that representation using values held in a symbol table.
 
-The symbol table is a simple dictionary, giving a simple, flat namespace.
-This comes pre-loaded with many functions from Python's builtin and math
-module.  If numpy is installed, many numpy functions are also included.
-Additional symbols can be added when an Interpreter is created, but the
-user of that interpreter will not be able to import additional modules.
+The symbol table is a simple dictionary, giving a flat namespace.  This comes
+pre-loaded with many functions from Python's builtin and math module.  If numpy
+is installed, many numpy functions are also included.  Additional symbols can
+be added when an Interpreter is created, but the user of that interpreter will
+not be able to import additional modules.
 
 Expressions, including loops, conditionals, and function definitions can be
 compiled into ast node and then evaluated later, using the current values
@@ -21,12 +21,12 @@ numerical calculations that is somewhat safer than 'eval' because many
 unsafe operations (such as 'import' and 'eval') are simply not allowed.
 
 Many parts of Python syntax are supported, including:
-     for loops, while loops, if-then-elif-else conditionals
-     try-except (including 'finally')
+     for loops, while loops, if-then-elif-else conditionals, with,
+     try-except-finally
      function definitions with def
      advanced slicing:    a[::-1], array[-3:, :, ::2]
      if-expressions:      out = one_thing if TEST else other
-     list comprehension   out = [sqrt(i) for i in values]
+     list, dict, and set comprehension
 
 The following Python syntax elements are not supported:
      Import, Exec, Lambda, Class, Global, Generators,
@@ -37,22 +37,30 @@ functions that are considered unsafe are missing ('eval', 'exec', and
 'getattr' for example)
 """
 import ast
+import sys
 import copy
 import inspect
 import time
 from sys import exc_info, stderr, stdout
 
 from .astutils import (HAS_NUMPY, UNSAFE_ATTRS, ExceptionHolder, ReturnedNone,
-                       make_symbol_table, numpy, op2func, valid_symbol_name)
+                       make_symbol_table, numpy, op2func, valid_symbol_name,
+                       Procedure)
 
 ALL_NODES = ['arg', 'assert', 'assign', 'attribute', 'augassign', 'binop',
-             'boolop', 'break', 'call', 'compare', 'continue', 'delete',
-             'dict', 'ellipsis', 'excepthandler', 'expr', 'extslice',
-             'for', 'functiondef', 'if', 'ifexp', 'index', 'interrupt',
-             'list', 'listcomp', 'module', 'name', 'nameconstant', 'num',
-             'pass', 'raise', 'repr', 'return', 'slice', 'str',
-             'subscript', 'try', 'tuple', 'unaryop', 'while', 'constant']
+             'boolop', 'break', 'bytes', 'call', 'compare', 'constant',
+             'continue', 'delete', 'dict', 'dictcomp', 'ellipsis',
+             'excepthandler', 'expr', 'extslice', 'for', 'functiondef', 'if',
+             'ifexp', 'import', 'importfrom', 'index', 'interrupt', 'list',
+             'listcomp', 'module', 'name', 'nameconstant', 'num', 'pass',
+             'print', 'raise', 'repr', 'return', 'set', 'setcomp', 'slice',
+             'str', 'subscript', 'try', 'tuple', 'unaryop', 'while', 'with',
+             'formattedvalue', 'joinedstr']
 
+DEF_DISABLED = ('import', 'importfrom')
+MIN_DISABLED = ('import', 'importfrom', 'if', 'for', 'while', 'try', 'with',
+                'functiondef', 'ifexp', 'listcomp', 'dictcomp', 'setcomp',
+                'augassign', 'assert', 'delete', 'raise', 'print')
 
 class Interpreter:
     """create an asteval Interpreter: a restricted, simplified interpreter
@@ -72,51 +80,46 @@ class Interpreter:
         whether to use functions from numpy.
     max_statement_length : int
         maximum length of expression allowed [50,000 characters]
-    minimal : bool
-        create a minimal interpreter: disable all options (see Note 1).
-    no_if : bool
-        whether to support `if` blocks
-    no_for : bool
-        whether to support `for` blocks.
-    no_while : bool
-        whether to support `while` blocks.
-    no_try : bool
-        whether to support `try` blocks.
-    no_functiondef : bool
-        whether to support user-defined functions.
-    no_ifexp : bool
-        whether to support if expressions.
-    no_listcomp : bool
-        whether to support list comprehension.
-    no_augassign : bool
-        whether to support augemented assignments (`a += 1`, etc).
-    no_assert : bool
-        whether to support `assert`.
-    no_delete : bool
-        whether to support `del`.
-    no_raise : bool
-        whether to support `raise`.
-    no_print : bool
-        whether to support `print`.
     readonly_symbols : iterable or `None`
         symbols that the user can not assign to
     builtins_readonly : bool
         whether to blacklist all symbols that are in the initial symtable
+    minimal : bool
+        create a minimal interpreter: disable many nodes (see Note 1).
+    config : dict
+        dictionay listing which nodes to support (see note 2))
 
     Notes
     -----
-    1. setting `minimal=True` is equivalent to setting all
-       `no_***` options to `True`.
+    1. setting `minimal=True` is equivalent to setting a config with the following
+       nodes disabled: ('import', 'importfrom', 'if', 'for', 'while', 'try', 'with',
+       'functiondef', 'ifexp', 'listcomp', 'dictcomp', 'setcomp', 'augassign',
+       'assert', 'delete', 'raise', 'print')
+    2. by default 'import' and 'importfrom' are disabled, though they can be enabled.
     """
-
     def __init__(self, symtable=None, usersyms=None, writer=None,
-                 err_writer=None, use_numpy=True,
-                 max_statement_length=50000, minimal=False, no_if=False,
-                 no_for=False, no_while=False, no_try=False,
-                 no_functiondef=False, no_ifexp=False, no_listcomp=False,
-                 no_augassign=False, no_assert=False, no_delete=False,
-                 no_raise=False, no_print=False, max_time=None,
-                 readonly_symbols=None, builtins_readonly=False):
+                 err_writer=None, use_numpy=True, max_statement_length=50000,
+                 minimal=False, readonly_symbols=None, builtins_readonly=False,
+                 config=None, **kws):
+
+        self.config = {}
+        disabled = MIN_DISABLED if minimal else DEF_DISABLED
+        for node in ALL_NODES:
+            self.config[node] = node not in disabled
+
+        if config is not None:
+            self.config.update(config)
+
+        if len(kws) > 0:
+            for key, val in kws.items():
+                if key.startswith('no_'):
+                    node = key[3:]
+                    if node in self.config:
+                        self.config[node] = not val
+                elif key.startswith('with_'):
+                    node = key[5:]
+                    if node in self.config:
+                        self.config[node] = val
 
         self.writer = writer or stdout
         self.err_writer = err_writer or stderr
@@ -127,6 +130,7 @@ class Interpreter:
                 usersyms = {}
             symtable = make_symbol_table(use_numpy=use_numpy, **usersyms)
 
+        symtable['print'] = self._printer
         self.symtable = symtable
         self._interrupt = None
         self.error = []
@@ -138,39 +142,14 @@ class Interpreter:
         self.start_time = time.time()
         self.use_numpy = HAS_NUMPY and use_numpy
 
-        symtable['print'] = self._printer
-        self.no_print = no_print or minimal
-
-        nodes = ALL_NODES[:]
-
-        if minimal or no_if:
-            nodes.remove('if')
-        if minimal or no_for:
-            nodes.remove('for')
-        if minimal or no_while:
-            nodes.remove('while')
-        if minimal or no_try:
-            nodes.remove('try')
-        if minimal or no_functiondef:
-            nodes.remove('functiondef')
-        if minimal or no_ifexp:
-            nodes.remove('ifexp')
-        if minimal or no_assert:
-            nodes.remove('assert')
-        if minimal or no_delete:
-            nodes.remove('delete')
-        if minimal or no_raise:
-            nodes.remove('raise')
-        if minimal or no_listcomp:
-            nodes.remove('listcomp')
-        if minimal or no_augassign:
-            nodes.remove('augassign')
-
         self.node_handlers = {}
-        for node in nodes:
-            self.node_handlers[node] = getattr(self, "on_%s" % node)
+        for node, use in self.config.items():
+            handler = getattr(self, f"on_{node}", self.unimplemented)
+            if not use:
+                handler = self.unimplemented
+            self.node_handlers[node] = handler
 
-        # to rationalize try/except try/finally for Python2.6 through Python3.3
+        # to rationalize try/except try/finally
         if 'try' in self.node_handlers:
             self.node_handlers['tryexcept'] = self.node_handlers['try']
             self.node_handlers['tryfinally'] = self.node_handlers['try']
@@ -198,9 +177,12 @@ class Interpreter:
             out = self.node_handlers.pop(node)
         return out
 
-    def set_nodehandler(self, node, handler):
-        """set node handler"""
+    def set_nodehandler(self, node, handler=None):
+        """set node handler or use current built-in default"""
+        if handler is None:
+            handler = getattr(self, f"on_{node}", self.unimplemented)
         self.node_handlers[node] = handler
+        return handler
 
     def user_defined_symbols(self):
         """Return a set of symbols that have been added to symtable after
@@ -222,9 +204,8 @@ class Interpreter:
 
     def unimplemented(self, node):
         """Unimplemented nodes."""
-        self.raise_exception(node, exc=NotImplementedError,
-                             msg="'%s' not supported" %
-                             (node.__class__.__name__))
+        msg = f"{node.__class__.__name__} not supported"
+        self.raise_exception(node, exc=NotImplementedError, msg=msg)
 
     def raise_exception(self, node, exc=None, msg='', expr=None,
                         lineno=None):
@@ -234,12 +215,12 @@ class Interpreter:
         if expr is None:
             expr = self.expr
         if len(self.error) > 0 and not isinstance(node, ast.Module):
-            msg = '%s' % msg
+            msg = f'{msg!s}'
         err = ExceptionHolder(node, exc=exc, msg=msg, expr=expr, lineno=lineno)
         self._interrupt = ast.Raise()
         self.error.append(err)
         if self.error_msg is None:
-            self.error_msg = (' '.join([msg, "at expr='%s'" % (self.expr)])).strip()
+            self.error_msg = (' '.join([msg, f"at expr='{self.expr}'"])).strip()
         elif len(msg) > 0:
             self.error_msg = msg
         if exc is None:
@@ -257,15 +238,14 @@ class Interpreter:
         """Parse statement/expression to Ast representation."""
         if len(text) > self.max_statement_length:
             msg = f'length of text exceeds {self.max_statement_length:d} characters'
-            self.raise_exception(None, msg='Runtime Error', expr=msg)
-
+            self.raise_exception(None, exc=RuntimeError, expr=msg)
         self.expr = text
         try:
             out = ast.parse(text)
         except SyntaxError:
-            self.raise_exception(None, msg='Syntax Error', expr=text)
+            self.raise_exception(None, exc=SyntaxError, expr=text)
         except:
-            self.raise_exception(None, msg='Runtime Error', expr=text)
+            self.raise_exception(None, exc=RuntimeError, expr=text)
 
         return out
 
@@ -294,7 +274,7 @@ class Interpreter:
         try:
             handler = self.node_handlers[node.__class__.__name__.lower()]
         except KeyError:
-            return self.unimplemented(node)
+            self.raise_exception(None, exc=NotImplementedError, expr=expr)
 
         # run the handler:  this will likely generate
         # recursive calls into this run method.
@@ -309,6 +289,7 @@ class Interpreter:
                     # Unhandled exception that didn't use raise_exception
                     self.raise_exception(node, expr=expr)
                 raise
+        return None
 
     def __call__(self, expr, **kw):
         """Call class instance as function."""
@@ -320,28 +301,23 @@ class Interpreter:
         self.error = []
         self.start_time = time.time()
         if isinstance(expr, str):
-            if len(expr) > self.max_statement_length:
-                msg = f'length of text exceeds {self.max_statement_length:d} characters'
-                raise ValueError(msg)
-
             try:
                 node = self.parse(expr)
-            except:
+            except Exception:
                 errmsg = exc_info()[1]
                 if len(self.error) > 0:
                     errmsg = "\n".join(self.error[0].get_error())
                 if raise_errors:
                     try:
                         exc = self.error[0].exc
-                    except:
+                    except Exception:
                         exc = RuntimeError
                     raise exc(errmsg)
                 if show_errors:
                     print(errmsg, file=self.err_writer)
-                return
+                return None
         else:
             node = expr
-
         try:
             return self.run(node, expr=expr, lineno=lineno)
         except:
@@ -351,12 +327,12 @@ class Interpreter:
             if raise_errors:
                 try:
                     exc = self.error[0].exc
-                except:
+                except Exception:
                     exc = RuntimeError
                 raise exc(errmsg)
             if show_errors:
                 print(errmsg, file=self.err_writer)
-            return
+
 
     @staticmethod
     def dump(node, **kw):
@@ -367,6 +343,60 @@ class Interpreter:
     def on_expr(self, node):
         """Expression."""
         return self.run(node.value)  # ('value',)
+
+    # imports
+    def on_import(self, node):    # ('names',)
+        "simple import"
+        for tnode in node.names:
+            self.import_module(tnode.name, tnode.asname)
+
+    def on_importfrom(self, node):    # ('module', 'names', 'level')
+        "import/from"
+        fromlist, asname = [], []
+        for tnode in node.names:
+            fromlist.append(tnode.name)
+            asname.append(tnode.asname)
+        self.import_module(node.module, asname, fromlist=fromlist)
+
+    def import_module(self, name, asname, fromlist=None):
+        """import a python module, installing it into the symbol table.
+        options:
+          name       name of module to import 'foo' in 'import foo'
+          asname     alias for imported name(s)
+                          'bar' in 'import foo as bar'
+                       or
+                          ['s','t'] in 'from foo import x as s, y as t'
+          fromlist   list of symbols to import with 'from-import'
+                         ['x','y'] in 'from foo import x, y'
+        """
+        # find module in sys.modules or import to it
+        if name in sys.modules:
+            thismod = sys.modules[name]
+        else:
+            try:
+                __import__(name)
+                thismod = sys.modules[name]
+            except:
+                self.raise_exception(None, exc=ImportError, msg='Import Error')
+
+        if fromlist is None:
+            if asname is not None:
+                self.symtable[asname] = sys.modules[name]
+            else:
+                mparts = []
+                parts = name.split('.')
+                while len(parts) > 0:
+                    mparts.append(parts.pop(0))
+                    modname = '.'.join(mparts)
+                    inname = name if (len(parts) == 0) else modname
+                    self.symtable[inname] = sys.modules[modname]
+        else: #  import-from construct
+            if asname is None:
+                asname = [None]*len(fromlist)
+            for sym, alias in zip(fromlist, asname):
+                if alias is None:
+                    alias = sym
+                self.symtable[alias] = getattr(thismod, sym)
 
     def on_index(self, node):
         """Index."""
@@ -379,7 +409,6 @@ class Interpreter:
         self.retval = self.run(node.value)
         if self.retval is None:
             self.retval = ReturnedNone
-        return
 
     def on_repr(self, node):
         """Repr."""
@@ -401,7 +430,7 @@ class Interpreter:
         return None  # ()
 
     def on_ellipsis(self, node):
-        """Ellipses."""
+        """Ellipses.  deprecated in 3.8"""
         return Ellipsis
 
     # for break and continue: set the instance variable _interrupt
@@ -433,6 +462,10 @@ class Interpreter:
         """Tuple."""
         return tuple(self.on_list(node))
 
+    def on_set(self, node):    # ('elts')
+        """Set."""
+        return set([self.run(k) for k in node.elts])
+
     def on_dict(self, node):    # ('keys', 'values')
         """Dictionary."""
         return {self.run(k): self.run(v) for k, v in
@@ -443,27 +476,44 @@ class Interpreter:
         return node.value
 
     def on_num(self, node):   # ('n',)
-        """Return number."""
+        """Return number.  deprecated in 3.8"""
         return node.n
 
     def on_str(self, node):   # ('s',)
-        """Return string."""
+        """Return string.  deprecated in 3.8"""
         return node.s
+
+    def on_bytes(self, node):
+        """return bytes.  deprecated in 3.8"""
+        return node.s  # ('s',)
+
+    def on_joinedstr(self, node):  # ('values',)
+        "join strings, used in f-strings"
+        return ''.join([self.run(k) for k in node.values])
+
+    def on_formattedvalue(self, node): # ('value', 'conversion', 'format_spec')
+        "formatting used in f-strings"
+        val = self.run(node.value)
+        fstring_converters = {115: str, 114: repr, 97: ascii}
+        if node.conversion in fstring_converters:
+            val = fstring_converters[node.conversion](val)
+        fmt = '{0}'
+        if node.format_spec is not None:
+            fmt = f'{{0:{self.run(node.format_spec)}}}'
+        return fmt.format(val)
 
     def on_name(self, node):    # ('id', 'ctx')
         """Name node."""
         ctx = node.ctx.__class__
         if ctx in (ast.Param, ast.Del):
             return str(node.id)
-        else:
-            if node.id in self.symtable:
-                return self.symtable[node.id]
-            else:
-                msg = "name '%s' is not defined" % node.id
-                self.raise_exception(node, exc=NameError, msg=msg)
+        if node.id in self.symtable:
+            return self.symtable[node.id]
+        msg = f"name '{node.id}' is not defined"
+        self.raise_exception(node, exc=NameError, msg=msg)
 
     def on_nameconstant(self, node):
-        """True, False, or None"""
+        """True, False, or None  deprecated in 3.8"""
         return node.value
 
     def node_assign(self, node, val):
@@ -476,7 +526,7 @@ class Interpreter:
         if node.__class__ == ast.Name:
             if (not valid_symbol_name(node.id) or
                     node.id in self.readonly_symbols):
-                errmsg = "invalid symbol name (reserved word?) %s" % node.id
+                errmsg = f"invalid symbol name (reserved word?) {node.id}"
                 self.raise_exception(node, exc=NameError, msg=errmsg)
             self.symtable[node.id] = val
             if node.id in self.no_deepcopy:
@@ -484,7 +534,7 @@ class Interpreter:
 
         elif node.__class__ == ast.Attribute:
             if node.ctx.__class__ == ast.Load:
-                msg = "cannot assign to attribute %s" % node.attr
+                msg = f"cannot assign to attribute {node.attr}"
                 self.raise_exception(node, exc=AttributeError, msg=msg)
 
             setattr(self.run(node.value), node.attr, val)
@@ -520,7 +570,7 @@ class Interpreter:
                 pass
 
         # AttributeError or accessed unsafe attribute
-        msg = "no attribute '%s' for %s" % (node.attr, self.run(node.value))
+        msg = f"no attribute '{node.attr}' for {self.run(node.value)}"
         self.raise_exception(node, exc=AttributeError, msg=msg)
 
     def on_assign(self, node):    # ('targets', 'value')
@@ -528,7 +578,6 @@ class Interpreter:
         val = self.run(node.value)
         for tnode in node.targets:
             self.node_assign(tnode, val)
-        return
 
     def on_augassign(self, node):    # ('target', 'op', 'value')
         """Augmented assign."""
@@ -554,9 +603,8 @@ class Interpreter:
         ctx = node.ctx.__class__
         if ctx in (ast.Load, ast.Store):
             return val[nslice]
-        else:
-            msg = "subscript with unknown context"
-            self.raise_exception(node, msg=msg)
+        msg = "subscript with unknown context"
+        self.raise_exception(node, msg=msg)
 
     def on_delete(self, node):    # ('targets',)
         """Delete statement."""
@@ -590,8 +638,8 @@ class Interpreter:
         val = self.run(node.values[0])
         is_and = ast.And == node.op.__class__
         if (is_and and val) or (not is_and and not val):
-            for n in node.values[1:]:
-                val = op2func(node.op)(val, self.run(n))
+            for nodeval in node.values[1:]:
+                val = op2func(node.op)(val, self.run(nodeval))
                 if (is_and and not val) or (not is_and and val):
                     break
         return val
@@ -600,9 +648,9 @@ class Interpreter:
         """comparison operators, including chained comparisons (a<b<c)"""
         lval = self.run(node.left)
         results = []
-        for op, rnode in zip(node.ops, node.comparators):
+        for oper, rnode in zip(node.ops, node.comparators):
             rval = self.run(rnode)
-            ret = op2func(op)(lval, rval)
+            ret = op2func(oper)(lval, rval)
             results.append(ret)
             if ((self.use_numpy and not isinstance(ret, numpy.ndarray)) and
                     not ret):
@@ -610,24 +658,21 @@ class Interpreter:
             lval = rval
         if len(results) == 1:
             return results[0]
-        else:
-            out = True
-            for r in results:
-                out = out and r
+        out = True
+        for ret in results:
+            out = out and ret
         return out
 
     def _printer(self, *out, **kws):
         """Generic print function."""
-        if self.no_print:
-            return
-        flush = kws.pop('flush', True)
-        fileh = kws.pop('file', self.writer)
-        sep = kws.pop('sep', ' ')
-        end = kws.pop('sep', '\n')
-
-        print(*out, file=fileh, sep=sep, end=end)
-        if flush:
-            fileh.flush()
+        if self.config['print']:
+            flush = kws.pop('flush', True)
+            fileh = kws.pop('file', self.writer)
+            sep = kws.pop('sep', ' ')
+            end = kws.pop('sep', '\n')
+            print(*out, file=fileh, sep=sep, end=end)
+            if flush:
+                fileh.flush()
 
     def on_if(self, node):    # ('test', 'body', 'orelse')
         """Regular if-then-else statement."""
@@ -675,10 +720,32 @@ class Interpreter:
                 self.run(tnode)
         self._interrupt = None
 
-    def on_listcomp(self, node):    # ('elt', 'generators')
-        """List comprehension -- only up to 4 generators!"""
-        out = []
-        locals = {}
+    def on_with(self, node):    # ('items', 'body', 'type_comment')
+        """with blocks."""
+        contexts = []
+        for item in node.items:
+            ctx = self.run(item.context_expr)
+            contexts.append(ctx)
+            if hasattr(ctx, '__enter__'):
+                result = ctx.__enter__()
+                if item.optional_vars is not None:
+                    self.node_assign(item.optional_vars, result)
+            else:
+                msg = "object does not support the context manager protocol"
+                raise TypeError(f"'{type(ctx)}' {msg}")
+        for bnode in node.body:
+            self.run(bnode)
+            if self._interrupt is not None:
+                break
+
+        for ctx in contexts:
+            if hasattr(ctx, '__exit__'):
+                ctx.__exit__()
+
+
+    def comprehension_data(self, node):      # ('elt', 'generators')
+        "data for comprehensions"
+        mylocals = {}
         saved_syms = {}
 
         for tnode in node.generators:
@@ -686,27 +753,26 @@ class Interpreter:
                 if tnode.target.__class__ == ast.Name:
                     if (not valid_symbol_name(tnode.target.id) or
                         tnode.target.id in self.readonly_symbols):
-                        errmsg = "invalid symbol name (reserved word?) %s" % tnode.target.id
+                        errmsg = f"invalid symbol name (reserved word?) {tnode.target.id}"
                         self.raise_exception(tnode.target, exc=NameError, msg=errmsg)
-                    locals[tnode.target.id] = []
+                    mylocals[tnode.target.id] = []
                     if tnode.target.id in self.symtable:
                         saved_syms[tnode.target.id] = copy.deepcopy(self.symtable[tnode.target.id])
 
                 elif tnode.target.__class__ == ast.Tuple:
                     target = []
                     for tval in tnode.target.elts:
-                        locals[tval.id] = []
+                        mylocals[tval.id] = []
                         if tval.id in self.symtable:
                             saved_syms[tval.id] = copy.deepcopy(self.symtable[tval.id])
 
         for tnode in node.generators:
             if tnode.__class__ == ast.comprehension:
-                tlist = []
                 ttype = 'name'
                 if tnode.target.__class__ == ast.Name:
                     if (not valid_symbol_name(tnode.target.id) or
                         tnode.target.id in self.readonly_symbols):
-                        errmsg = "invalid symbol name (reserved word?) %s" % tnode.target.id
+                        errmsg = f"invalid symbol name (reserved word?) {tnode.target.id}"
                         self.raise_exception(tnode.target, exc=NameError, msg=errmsg)
                     ttype, target = 'name', tnode.target.id
                 elif tnode.target.__class__ == ast.Tuple:
@@ -725,28 +791,57 @@ class Interpreter:
                         add = add and self.run(cond)
                     if add:
                         if ttype == 'name':
-                            locals[target].append(val)
+                            mylocals[target].append(val)
                         else:
                             for telem, tval in zip(target, val):
-                                locals[telem].append(tval)
+                                mylocals[telem].append(tval)
+        return mylocals, saved_syms
 
-        def listcomp_recurse(i, names, data):
+    def on_listcomp(self, node):
+        """List comprehension"""
+        mylocals, saved_syms = self.comprehension_data(node)
+
+        names = list(mylocals.keys())
+        data = list(mylocals.values())
+        def listcomp_recurse(out, i, names, data):
             if i == len(names):
                 out.append(self.run(node.elt))
                 return
 
             for val in data[i]:
                 self.symtable[names[i]] = val
-                listcomp_recurse(i+1, names, data)
+                listcomp_recurse(out, i+1, names, data)
 
-        names = list(locals.keys())
-        data = list(locals.values())
-
-        listcomp_recurse(0, names, data)
-
+        out = []
+        listcomp_recurse(out, 0, names, data)
         for name, val in saved_syms.items():
             self.symtable[name] = val
+        return out
 
+    def on_setcomp(self, node):
+        """Set comprehension"""
+        return set(self.on_listcomp(node))
+
+    def on_dictcomp(self, node):
+        """Dictionary comprehension"""
+        mylocals, saved_syms = self.comprehension_data(node)
+
+        names = list(mylocals.keys())
+        data = list(mylocals.values())
+
+        def dictcomp_recurse(out, i, names, data):
+            if i == len(names):
+                out[self.run(node.key)] = self.run(node.value)
+                return
+
+            for val in data[i]:
+                self.symtable[names[i]] = val
+                dictcomp_recurse(out, i+1, names, data)
+
+        out = {}
+        dictcomp_recurse(out, 0, names, data)
+        for name, val in saved_syms.items():
+            self.symtable[name] = val
         return out
 
 
@@ -761,7 +856,7 @@ class Interpreter:
             self.run(tnode, with_raise=False)
             no_errors = no_errors and len(self.error) == 0
             if len(self.error) > 0:
-                e_type, e_value, e_tback = self.error[-1].exc_info
+                e_type, e_value, _ = self.error[-1].exc_info
                 for hnd in node.handlers:
                     htype = None
                     if hnd.type is not None:
@@ -798,7 +893,7 @@ class Interpreter:
         #  ('func', 'args', 'keywords'. Py<3.5 has 'starargs' and 'kwargs' too)
         func = self.run(node.func)
         if not hasattr(func, '__call__') and not isinstance(func, type):
-            msg = "'%s' is not callable!!" % (func)
+            msg = f"'{func}' is not callable!!"
             self.raise_exception(node, exc=TypeError, msg=msg)
 
         args = [self.run(targ) for targ in node.args]
@@ -811,19 +906,17 @@ class Interpreter:
             keywords['file'] = self.writer
         for key in node.keywords:
             if not isinstance(key, ast.keyword):
-                msg = "keyword error in function call '%s'" % (func)
+                msg = f"keyword error in function call '{func}'"
                 self.raise_exception(node, msg=msg)
             if key.arg is None:
                 keywords.update(self.run(key.value))
             elif key.arg in keywords:
-                self.raise_exception(node,
-                                     msg="keyword argument repeated: %s" % key.arg,
-                                     exc=SyntaxError)
+                self.raise_exception(node, exc=SyntaxError,
+                                     msg=f"keyword argument repeated: {key.arg}")
             else:
                 keywords[key.arg] = self.run(key.value)
 
         kwargs = getattr(node, 'kwargs', None)
-
         if kwargs is not None:
             keywords.update(self.run(kwargs))
 
@@ -834,9 +927,9 @@ class Interpreter:
         except Exception as ex:
             out = None
             func_name = getattr(func, '__name__', str(func))
-            self.raise_exception(
-                node, msg="Error running function call '%s' with args %s and "
-                "kwargs %s: %s" % (func_name, args, keywords, ex))
+            msg = f"Error running function '{func_name}' with args '{args}'"
+            msg = f"{msg} and kwargs {keywords}: {ex}"
+            self.raise_exception(node, msg=msg)
         finally:
             if isinstance(func, Procedure):
                 self._calldepth -= 1
@@ -855,7 +948,7 @@ class Interpreter:
 
         if (not valid_symbol_name(node.name) or
                 node.name in self.readonly_symbols):
-            errmsg = "invalid function name (reserved word?) %s" % node.name
+            errmsg = f"invalid function name (reserved word?) {node.name}"
             self.raise_exception(node, exc=NameError, msg=errmsg)
 
         offset = len(node.args.args) - len(node.args.defaults)
@@ -884,155 +977,3 @@ class Interpreter:
                                              vararg=vararg, varkws=varkws)
         if node.name in self.no_deepcopy:
             self.no_deepcopy.remove(node.name)
-
-
-class Procedure:
-    """Procedure: user-defined function for asteval.
-
-    This stores the parsed ast nodes as from the 'functiondef' ast node
-    for later evaluation.
-
-    """
-
-    def __init__(self, name, interp, doc=None, lineno=0,
-                 body=None, args=None, kwargs=None,
-                 vararg=None, varkws=None):
-        """TODO: docstring in public method."""
-        self.__ininit__ = True
-        self.name = name
-        self.__name__ = self.name
-        self.__asteval__ = interp
-        self.raise_exc = self.__asteval__.raise_exception
-        self.__doc__ = doc
-        self.body = body
-        self.argnames = args
-        self.kwargs = kwargs
-        self.vararg = vararg
-        self.varkws = varkws
-        self.lineno = lineno
-        self.__ininit__ = False
-
-    def __setattr__(self, attr, val):
-        if not getattr(self, '__ininit__', True):
-            self.raise_exc(None, exc=TypeError,
-                           msg="procedure is read-only")
-        self.__dict__[attr] = val
-
-    def __dir__(self):
-        return ['name']
-
-    def __repr__(self):
-        """TODO: docstring in magic method."""
-        sig = ""
-        if len(self.argnames) > 0:
-            sig = "%s%s" % (sig, ', '.join(self.argnames))
-        if self.vararg is not None:
-            sig = "%s, *%s" % (sig, self.vararg)
-        if len(self.kwargs) > 0:
-            if len(sig) > 0:
-                sig = "%s, " % sig
-            _kw = ["%s=%s" % (k, v) for k, v in self.kwargs]
-            sig = "%s%s" % (sig, ', '.join(_kw))
-
-        if self.varkws is not None:
-            sig = "%s, **%s" % (sig, self.varkws)
-        sig = "<Procedure %s(%s)>" % (self.name, sig)
-        if self.__doc__ is not None:
-            sig = "%s\n  %s" % (sig, self.__doc__)
-        return sig
-
-    def __call__(self, *args, **kwargs):
-        """TODO: docstring in public method."""
-        symlocals = {}
-        args = list(args)
-        nargs = len(args)
-        nkws = len(kwargs)
-        nargs_expected = len(self.argnames)
-        # check for too few arguments, but the correct keyword given
-        if (nargs < nargs_expected) and nkws > 0:
-            for name in self.argnames[nargs:]:
-                if name in kwargs:
-                    args.append(kwargs.pop(name))
-            nargs = len(args)
-            nargs_expected = len(self.argnames)
-            nkws = len(kwargs)
-        if nargs < nargs_expected:
-            msg = "%s() takes at least %i arguments, got %i"
-            self.raise_exc(None, exc=TypeError,
-                           msg=msg % (self.name, nargs_expected, nargs))
-        # check for multiple values for named argument
-        if len(self.argnames) > 0 and kwargs is not None:
-            msg = "multiple values for keyword argument '%s' in Procedure %s"
-            for targ in self.argnames:
-                if targ in kwargs:
-                    self.raise_exc(None, exc=TypeError,
-                                   msg=msg % (targ, self.name),
-                                   lineno=self.lineno)
-
-        # check more args given than expected, varargs not given
-        if nargs != nargs_expected:
-            msg = None
-            if nargs < nargs_expected:
-                msg = 'not enough arguments for Procedure %s()' % self.name
-                msg = '%s (expected %i, got %i)' % (msg, nargs_expected, nargs)
-                self.raise_exc(None, exc=TypeError, msg=msg)
-
-        if nargs > nargs_expected and self.vararg is None:
-            if nargs - nargs_expected > len(self.kwargs):
-                msg = 'too many arguments for %s() expected at most %i, got %i'
-                msg = msg % (self.name, len(self.kwargs)+nargs_expected, nargs)
-                self.raise_exc(None, exc=TypeError, msg=msg)
-
-            for i, xarg in enumerate(args[nargs_expected:]):
-                kw_name = self.kwargs[i][0]
-                if kw_name not in kwargs:
-                    kwargs[kw_name] = xarg
-
-        for argname in self.argnames:
-            symlocals[argname] = args.pop(0)
-
-        try:
-            if self.vararg is not None:
-                symlocals[self.vararg] = tuple(args)
-
-            for key, val in self.kwargs:
-                if key in kwargs:
-                    val = kwargs.pop(key)
-                symlocals[key] = val
-
-            if self.varkws is not None:
-                symlocals[self.varkws] = kwargs
-
-            elif len(kwargs) > 0:
-                msg = 'extra keyword arguments for Procedure %s (%s)'
-                msg = msg % (self.name, ','.join(list(kwargs.keys())))
-                self.raise_exc(None, msg=msg, exc=TypeError,
-                               lineno=self.lineno)
-
-        except (ValueError, LookupError, TypeError,
-                NameError, AttributeError):
-            msg = 'incorrect arguments for Procedure %s' % self.name
-            self.raise_exc(None, msg=msg, lineno=self.lineno)
-
-        save_symtable = self.__asteval__.symtable.copy()
-        self.__asteval__.symtable.update(symlocals)
-        self.__asteval__.retval = None
-        self.__asteval__._calldepth += 1
-        retval = None
-
-        # evaluate script of function
-        for node in self.body:
-            self.__asteval__.run(node, expr='<>', lineno=self.lineno)
-            if len(self.__asteval__.error) > 0:
-                break
-            if self.__asteval__.retval is not None:
-                retval = self.__asteval__.retval
-                self.__asteval__.retval = None
-                if retval is ReturnedNone:
-                    retval = None
-                break
-
-        self.__asteval__.symtable = save_symtable
-        self.__asteval__._calldepth -= 1
-        symlocals = None
-        return retval
