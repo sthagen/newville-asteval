@@ -739,6 +739,8 @@ def test_list_comprehension_more(nested):
                 '[p*2.5 for p in odd]',
                 '[n for p in zip(odd, even) for n in p]',
                 '[(i*i + 0.5) for i in range(4)]',
+                '[i*3.2 for i in odd if i > 6 and i < 18]',
+                '[i-1.0 for i in odd if i > 4 and i*2 not in (26, 34)]',
                 ]:
 
         interp(f"out = {expr}")
@@ -1103,9 +1105,9 @@ def test_astdump(nested):
     assert isinstance(astnode, ast.Module)
     assert isinstance(astnode.body[0], ast.Assign)
     assert isinstance(astnode.body[0].targets[0], ast.Name)
-    assert isinstance(astnode.body[0].value, ast.Num)
+    assert isinstance(astnode.body[0].value, ast.Constant)
     assert astnode.body[0].targets[0].id == 'x'
-    assert astnode.body[0].value.n == 1
+    assert astnode.body[0].value.value == 1
     dumped = interp.dump(astnode.body[0])
     assert dumped.startswith('Assign')
 
