@@ -220,15 +220,11 @@ class Interpreter:
     def raise_exception(self, node, exc=None, msg='', expr=None,
                         lineno=None):
         """Add an exception."""
-        if self.error is None:
-            self.error = []
-        if len(self.error) > 1:
-            return
         if expr is None:
             expr = self.expr
-        if len(self.error) > 0 and not isinstance(node, ast.Module):
-            msg = f'{msg!s}'
+        msg = str(msg)
         err = ExceptionHolder(node, exc=exc, msg=msg, expr=expr, lineno=lineno)
+
         self._interrupt = ast.Raise()
         self.error.append(err)
         if self.error_msg is None:
@@ -236,10 +232,7 @@ class Interpreter:
         elif len(msg) > 0:
             self.error_msg = f"{exc:s}: {msg}"
         if exc is None:
-            try:
-                exc = self.error[0].exc
-            except:
-                exc = RuntimeError
+            exc = self.error[-1].exc
         raise exc(self.error_msg)
 
     # main entry point for Ast node evaluation
@@ -290,7 +283,6 @@ class Interpreter:
 
         # run the handler:  this will likely generate
         # recursive calls into this run method.
-
         try:
             ret = handler(node)
             if isinstance(ret, enumerate):
@@ -300,6 +292,15 @@ class Interpreter:
             if with_raise:
                 self.raise_exception(node, expr=expr)
                 raise
+
+        # avoid too many repeated error messages (yes, this needs to be "2")
+        if len(self.error) > 2:
+            error = [self.error[0]]
+            for err in self.error[1:]:
+                le = error[-1]
+                if err.exc != le.exc or err.expr != le.expr or err.msg !=  le.msg:
+                    error.append(err)
+            self.error = error
         return None
 
     def __call__(self, expr, **kw):
@@ -317,13 +318,10 @@ class Interpreter:
             except Exception:
                 errmsg = exc_info()[1]
                 if len(self.error) > 0:
-                    errmsg = self.error[0].get_error()[1]
-                if raise_errors:
-                    try:
-                        exc = self.error[0].exc
-                    except Exception:
-                        exc = RuntimeError
-                    raise exc(errmsg)
+                    lerr = self.error[-1]
+                    errmsg = lerr.get_error()[1]
+                    if raise_errors:
+                        raise lerr.exc(errmsg)
                 if show_errors:
                     print(errmsg, file=self.err_writer)
                 return None
@@ -334,13 +332,9 @@ class Interpreter:
         except:
             errmsg = exc_info()[1]
             if len(self.error) > 0:
-                errmsg = self.error[0].get_error()[1]
+                errmsg = self.error[-1].get_error()[1]
             if raise_errors:
-                try:
-                    exc = self.error[0].exc
-                except Exception:
-                    exc = RuntimeError
-                raise exc(errmsg)
+                raise self.error[-1].exc(errmsg)
             if show_errors:
                 print(errmsg, file=self.err_writer)
         return None
