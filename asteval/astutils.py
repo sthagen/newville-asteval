@@ -310,10 +310,10 @@ class SafeFormatter(Formatter):
             else:
                 obj = obj[i]
         return obj, first
-    
+
 def safe_format(_string, raise_exc, node, *args, **kwargs):
     formatter = SafeFormatter(raise_exc, node)
-    return formatter.vformat(_string, args, kwargs)                    
+    return formatter.vformat(_string, args, kwargs)
 
 def valid_symbol_name(name):
     """Determine whether the input symbol name is a valid name.
@@ -364,13 +364,24 @@ ReturnedNone = Empty()
 
 class ExceptionHolder:
     """Basic exception handler."""
-    def __init__(self, node, exc=None, msg='', expr=None, lineno=None):
+    def __init__(self, node, exc=None, msg='', expr=None,
+                 text=None, lineno=None):
         """TODO: docstring in public method."""
         self.node = node
         self.expr = expr
         self.msg = msg
         self.exc = exc
+        self.text = text
         self.lineno = lineno
+        self.end_lineno = lineno
+        self.col_offset = 0
+        if lineno is None:
+            try:
+                self.lineno = node.lineno
+                self.end_lineno = node.end_lineno
+                self.col_offset = node.col_offset
+            except:
+                pass
         self.exc_info = exc_info()
         if self.exc is None and self.exc_info[0] is not None:
             self.exc = self.exc_info[0]
@@ -379,12 +390,6 @@ class ExceptionHolder:
 
     def get_error(self):
         """Retrieve error data."""
-        col_offset = -1
-        if self.node is not None:
-            try:
-                col_offset = self.node.col_offset
-            except AttributeError:
-                pass
         try:
             exc_name = self.exc.__name__
         except AttributeError:
@@ -392,9 +397,16 @@ class ExceptionHolder:
         if exc_name in (None, 'None'):
             exc_name = 'UnknownError'
 
-        out = [f"   {self.expr}"]
-        if col_offset > 0:
-            out.append(f"    {col_offset*' '}^^^^")
+        out = []
+        self.code = [f'{l}' for l  in self.text.split('\n')]
+        self.codelines = [f'{i+1}: {l}' for i, l in enumerate(self.code)]
+
+        try:
+            out.append('\n'.join(self.code[self.lineno-1:self.end_lineno]))
+        except:
+            out.append(f"{self.expr}")
+        if self.col_offset > 0:
+            out.append(f"{self.col_offset*' '}^^^^")
         out.append(f"{exc_name}: {self.msg}")
         return (exc_name, '\n'.join(out))
 
@@ -546,8 +558,8 @@ class Procedure:
 
     """
 
-    def __init__(self, name, interp, doc=None, lineno=0,
-                 body=None, args=None, kwargs=None,
+    def __init__(self, name, interp, doc=None, lineno=None,
+                 body=None, text=None, args=None, kwargs=None,
                  vararg=None, varkws=None):
         """TODO: docstring in public method."""
         self.__ininit__ = True
@@ -562,12 +574,15 @@ class Procedure:
         self.__vararg__ = vararg
         self.__varkws__ = varkws
         self.lineno = lineno
+        self.__text__ = text
+        if text is None:
+            self.__text__ = f'{self.__signature__()}\n' + ast.unparse(self.__body__)
         self.__ininit__ = False
 
     def __setattr__(self, attr, val):
         if not getattr(self, '__ininit__', True):
             self.__raise_exc__(None, exc=TypeError,
-                           msg="procedure is read-only")
+                               msg="procedure is read-only")
         self.__dict__[attr] = val
 
     def __dir__(self):
@@ -637,14 +652,15 @@ class Procedure:
         if nargs < nargs_expected:
             msg = f"{self.name}() takes at least"
             msg = f"{msg} {nargs_expected} arguments, got {nargs}"
-            self.__raise_exc__(None, exc=TypeError, msg=msg)
+            self.__raise_exc__(None, exc=TypeError,  msg=msg)
         # check for multiple values for named argument
         if len(self.__argnames__) > 0 and kwargs is not None:
             msg = "multiple values for keyword argument"
             for targ in self.__argnames__:
                 if targ in kwargs:
                     msg = f"{msg} '{targ}' in Procedure {self.name}"
-                    self.__raise_exc__(None, exc=TypeError, msg=msg, lineno=self.lineno)
+                    self.__raise_exc__(None, exc=TypeError, msg=msg,
+                                      lineno=self.lineno)
 
         # check more args given than expected, varargs not given
         if nargs != nargs_expected:
@@ -684,7 +700,7 @@ class Procedure:
                 msg = f"extra keyword arguments for Procedure {self.name}: "
                 msg = msg + ','.join(list(kwargs.keys()))
                 self.__raise_exc__(None, msg=msg, exc=TypeError,
-                               lineno=self.lineno)
+                                   lineno=self.lineno)
 
         except (ValueError, LookupError, TypeError,
                 NameError, AttributeError):
@@ -703,8 +719,9 @@ class Procedure:
         retval = None
 
         # evaluate script of function
+        self.__asteval__.code_text.append(self.__text__)
         for node in self.__body__:
-            self.__asteval__.run(node, expr='<>', lineno=self.lineno)
+            self.__asteval__.run(node, lineno=node.lineno)
             if len(self.__asteval__.error) > 0:
                 break
             if self.__asteval__.retval is not None:
@@ -715,6 +732,7 @@ class Procedure:
                 break
 
         self.__asteval__.symtable = save_symtable
+        self.__asteval__.code_text.pop()
         self.__asteval__._calldepth -= 1
         symlocals = None
         return retval
