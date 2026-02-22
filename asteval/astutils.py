@@ -8,7 +8,6 @@ import ast
 import io
 import os
 import sys
-import ctypes
 import math
 import numbers
 import re
@@ -17,6 +16,10 @@ from tokenize import ENCODING as tk_ENCODING
 from tokenize import NAME as tk_NAME
 from tokenize import tokenize as generate_tokens
 from string import Formatter
+try:
+    import ctypes
+except ImportError:
+    ctypes = None
 
 builtins = __builtins__
 if not isinstance(builtins, dict):
@@ -78,7 +81,9 @@ UNSAFE_ATTRS_DTYPES = {str: ('format', 'format_map')}
 
 # unsafe modules that may be exposed in other modules
 # but should be prevented from being accessed
-UNSAFE_MODULES = (io, os, sys, ctypes)
+UNSAFE_MODULES = [io, os, sys]
+if ctypes is not None:
+    UNSAFE_MODULES.append(ctypes)
 
 # inherit these from python's __builtins__
 FROM_PY = ('ArithmeticError', 'AssertionError', 'AttributeError',
