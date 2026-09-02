@@ -7,11 +7,12 @@ import math
 import os
 import textwrap
 import time
-import unittest
+
 from functools import partial
 from io import StringIO
 from sys import version_info
 from tempfile import NamedTemporaryFile
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,9 +28,11 @@ except ImportError:
     HAS_NUMPY = False
 
 
-def make_interpreter(nested_symtable=True):
-    interp = Interpreter(nested_symtable=nested_symtable)
-    interp.writer = NamedTemporaryFile('w', delete=False, prefix='astevaltest')
+def make_interpreter(nested_symtable=True, writer=None, **kws):
+    interp = Interpreter(nested_symtable=nested_symtable, **kws)
+    if writer is None:
+        writer = NamedTemporaryFile('w', delete=False, prefix='astevaltest')
+    interp.writer = writer
     return interp
 
 def read_stdout(interp):
@@ -225,8 +228,8 @@ def test_ndarray_index(nested):
 def test_ndarrayslice(nested):
     """array slicing"""
     interp = make_interpreter(nested_symtable=nested)
-    interp("xlist = lisr(range(12))")
-    istrue(interp, "x[::3] == [0, 3, 6, 9]")
+    interp("xlist = list(range(12))")
+    istrue(interp, "xlist[::3] == [0, 3, 6, 9]")
     if HAS_NUMPY:
         interp("a_ndarray = arange(200).reshape(10, 20)")
         istrue(interp, "a_ndarray[1:3,5:7] == array([[25,26], [45,46]])")
@@ -237,7 +240,7 @@ def test_ndarrayslice(nested):
         interp("y[...,1] = array([2, 2, 2, 2])")
         istrue(interp, "y[1,:] == array([5, 2, 7, 8, 9])")
         interp("xarr = arange(12)")
-        istrue(interp, "x[::3] == array([0, 3, 6, 9])")
+        istrue(interp, "xlist[::3] == array([0, 3, 6, 9])")
 
 @pytest.mark.parametrize("nested", [False, True])
 def test_while(nested):
@@ -527,7 +530,8 @@ def test_comparisons_return(nested):
 
         interp("out = (x > 2.3 < 6.2)")
 
-        assert interp.error.pop().exc == ValueError
+        xerr = interp.error.pop()
+        assert xerr.exc == ValueError
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -590,13 +594,26 @@ def test_assignment(nested):
         interp('a[1:5] = 1 + 0.5 * arange(4)')
         isnear(interp, "a", np.array([0., 1., 1.5, 2., 2.5, 5., 6., 7., 8., 9.]))
 
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("attr", ["__private__", "func_globals"])
+def test_unsafe_attribute_assignment(nested, attr):
+    """unsafe attribute assignment"""
+    obj = SimpleNamespace()
+    sym_table = make_symbol_table(nested=nested, obj=obj)
+    interp = Interpreter(symtable=sym_table)
+    interp(f"obj.{attr} = 1", show_errors=False)
+    check_error(interp, 'AttributeError',
+                f'cannot assign to unsafe attribute {attr}')
+    assert not hasattr(obj, attr)
+
+
 @pytest.mark.parametrize("nested", [False, True])
 def test_names(nested):
     """names test"""
     interp = make_interpreter(nested_symtable=nested)
     interp('nx = 1')
     interp('nx1 = 1')
-        # use \u escape b/c python 2 complains about file encoding
     interp('\u03bb = 1')
     interp('\u03bb1 = 1')
 
@@ -611,7 +628,7 @@ def test_syntaxerrors_1(nested):
         # noinspection PyBroadException
         try:
             interp(expr, show_errors=False, raise_errors=True)
-        except:
+        except Exception:
             failed = True
 
         assert failed
@@ -626,7 +643,7 @@ def test_unsupportednodes(nested):
         # noinspection PyBroadException
         try:
             interp(expr, show_errors=False, raise_errors=True)
-        except:
+        except Exception:
             failed = True
     assert failed
     check_error(interp, 'NotImplementedError')
@@ -640,7 +657,7 @@ def test_syntaxerrors_2(nested):
         # noinspection PyBroadException
         try:
             interp(expr, show_errors=False, raise_errors=True)
-        except:  # RuntimeError:
+        except Exception:
             failed = True
     assert failed
     check_error(interp, 'SyntaxError')
@@ -667,7 +684,7 @@ def test_runtimeerrors_1(nested):
         # noinspection PyBroadException
         try:
             interp(expr, show_errors=False, raise_errors=True)
-        except:
+        except Exception:
             failed = True
     assert failed
     check_error(interp, errname)
@@ -685,7 +702,7 @@ def test_ndarrays(nested):
         istrue(interp, "isinstance(n, ndarray)")
         istrue(interp, "n.shape == (5, 4)")
         interp("myx = n.shape")
-        interp("n.shape = (4, 5)")
+        interp("n.reshape((4, 5))")
         istrue(interp, "n.shape == (4, 5)")
         interp("a = arange(20)")
         interp("gg = a[1:13:3]")
@@ -750,7 +767,7 @@ def test_namefinder(nested):
     nf = NameFinder()
     nf.generic_visit(p)
     assert 'x' in nf.names
-    assert  'y' in nf.names
+    assert 'y' in nf.names
     assert 'z' in nf.names
     assert 'cos' in nf.names
 
@@ -777,8 +794,9 @@ def test_list_comprehension(nested):
 def test_list_comprehension_more(nested):
     """more tests of list comprehension"""
     interp = make_interpreter(nested_symtable=nested)
-    odd = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19]
+    odd =  [1, 3, 5, 7, 9, 11, 13, 15, 17, 19]
     even = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+    assert len(odd) == len(even)
 
     interp('odd = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19]')
     interp('even = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]')
@@ -960,19 +978,19 @@ def test_reservedwords(nested):
         # noinspection PyBroadException
         try:
             interp("%s= 2" % w, show_errors=False, raise_errors=True)
-        except:
+        except Exception:
             pass
 
         check_error(interp, 'SyntaxError')
 
-        for w in ('True', 'False'):
+        for wval in ('True', 'False'):
             interp.error = []
-            interp("%s= 2" % w)
+            interp("%s= 2" % wval)
             check_error(interp, 'SyntaxError')
 
-        for w in ('eval', '__import__'):
+        for uval in ('eval', '__import__'):
             interp.error = []
-            interp("%s= 2" % w)
+            interp("%s= 2" % uval)
             check_error(interp, 'NameError')
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -1010,7 +1028,7 @@ def test_tryexcept(nested):
             try:
                 raise Exception()
                 x = 20
-            except:
+            except Exception:
                 pass
             """))
     isvalue(interp, 'x', 15)
@@ -1366,8 +1384,8 @@ def test_removenodehandler(nested):
 @pytest.mark.parametrize("nested", [False, True])
 def test_set_default_nodehandler(nested):
     interp = make_interpreter(nested_symtable=nested)
-    handler_import = interp.set_nodehandler('import')
-    handler_importfrom = interp.set_nodehandler('importfrom')
+    interp.set_nodehandler('import')
+    interp.set_nodehandler('importfrom')
     interp('import ast')
     check_error(interp, None)
 
@@ -1407,14 +1425,39 @@ def test_interpreter_opts(nested):
     assert not imin.config['augassign']
     assert not imin.config['with']
 
+    imin('import socket')
+    assert len(imin.error) > 0
+    imin.error = []
+    imin('x = 9')
+    imin('y = 4 if x > 0 else -1')
+    assert len(imin.error) > 0
+
+
     ix = Interpreter(with_import=True, with_importfrom=True, nested_symtable=nested)
     assert ix.node_handlers['ifexp'] != ix.unimplemented
     assert ix.node_handlers['import'] != ix.unimplemented
     assert ix.node_handlers['importfrom'] != ix.unimplemented
 
+    ix('import socket')
+    assert len(ix.error) == 0
+    ix('from pathlib import Path')
+    assert len(ix.error) == 0
+    ix('from pathlib import not_importable')
+    assert len(ix.error) > 0
+
+    ix.error = []
+    ix('import nq77spr23as_module_not_avaiable')
+    assert len(ix.error) > 0
+
     i2 = Interpreter(config=conf, nested_symtable=nested)
     assert i2.node_handlers['ifexp'] != i2.unimplemented
     assert i2.node_handlers['import'] == i2.unimplemented
+    i2('import socket')
+    assert len(i2.error) > 0
+    i2.error = []
+    i2('x = 9')
+    i2('y = 4 if x > 0 else -1')
+    assert len(i2.error) == 0
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -1568,8 +1611,9 @@ def test_partial_exception(nested):
     # __name__ attribute, so we want to make sure that an AttributeError is
     # not raised.
 
-    result = aeval("sqrt(-1)")
-    assert aeval.error.pop().exc == ValueError
+    aeval("sqrt(-1)")
+    errx = aeval.error.pop()
+    assert errx.exc == ValueError
 
 @pytest.mark.parametrize("nested", [False, True])
 def test_inner_return(nested):
@@ -1606,11 +1650,11 @@ def test_pow(nested):
 @pytest.mark.parametrize("nested", [False, True])
 def test_stringio(nested):
     """ test using stringio for output/errors """
-    interp = make_interpreter(nested_symtable=nested)
     out = StringIO()
     err = StringIO()
-    intrep = Interpreter(writer=out, err_writer=err)
-    intrep("print('out')")
+    interp = make_interpreter(nested_symtable=nested,
+                              writer=out, err_writer=err)
+    interp("print('out')")
     assert out.getvalue() == 'out\n'
 
 @pytest.mark.parametrize("nested", [False, True])
